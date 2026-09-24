@@ -1,0 +1,38 @@
+# =============================================================================
+# 06-etcd-strategy / 02-scripts-configmap.yaml
+# 上傳 + 依保留天數清理舊 snapshot 的腳本（與線上 etcd-backup-scripts 內容一致）。
+#
+# 為什麼腳本要放在另一個容器：官方 etcd image（registry.k8s.io/etcd）是 distroless，
+# 沒有 shell、沒有 aws CLI；所以 snapshot 在 initContainer 用 etcd image 拍，
+# 上傳在主容器用 amazon/aws-cli image 做，兩者透過 emptyDir 交換檔案。
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: etcd-backup-scripts
+  namespace: etcd-backup
+data:
+  upload-and-prune.sh: |
+    #!/bin/sh
+    set -eu
+    # etcd 官方 image 沒有 shell，snapshot 檔案固定存成 /backup/snapshot.db（見 initContainer），
+    # 時間戳記改成在這裡（有 shell 的 aws-cli image）產生，放進上傳到 S3 的檔名裡。
+    FILE="/backup/snapshot.db"
+    DEST_NAME="etcd-snapshot-${NODE_NAME}-$(date +%Y%m%d%H%M%S).db"
+    echo "Uploading ${FILE} -> s3://${S3_BUCKET}/${NODE_NAME}/${DEST_NAME}"
+    aws --endpoint-url="${S3_ENDPOINT}" s3 cp "${FILE}" "s3://${S3_BUCKET}/${NODE_NAME}/${DEST_NAME}"
+    
+    echo "Pruning objects older than ${RETENTION_DAYS} days under ${NODE_NAME}/"
+    CUTOFF="$(date -d "-${RETENTION_DAYS} days" +%s)"
+    aws --endpoint-url="${S3_ENDPOINT}" s3api list-objects-v2 \
+      --bucket "${S3_BUCKET}" --prefix "${NODE_NAME}/" \
+      --query 'Contents[].[Key,LastModified]' --output text | \
+    while read -r KEY LASTMOD; do
+      [ -z "${KEY}" ] && continue
+      OBJ_EPOCH="$(date -d "${LASTMOD}" +%s)"
+      if [ "${OBJ_EPOCH}" -lt "${CUTOFF}" ]; then
+        echo "  deleting s3://${S3_BUCKET}/${KEY} (last modified ${LASTMOD})"
+        aws --endpoint-url="${S3_ENDPOINT}" s3api delete-object --bucket "${S3_BUCKET}" --key "${KEY}"
+      fi
+    done
+    echo "Done."

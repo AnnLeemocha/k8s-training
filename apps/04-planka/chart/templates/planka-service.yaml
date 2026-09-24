@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: planka
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: planka
+    {{- include "planka.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: planka
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

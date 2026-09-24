@@ -1,0 +1,19 @@
+# =============================================================================
+# 04-first-restore / velero/restore-to-new-namespace.yaml
+# 情境：原本的 dr-demo 還活著，想先「還原到旁邊」確認備份內容，再決定要不要切換。
+# 這也是最安全的還原演練方式 —— 不碰正在運作的應用。（本課程實測就是用這個）
+# 等價 CLI：
+#   velero restore create dr-course-restore-01 --from-backup dr-course-backup-01 \
+#     --namespace-mappings dr-demo:dr-demo-restore --restore-volumes=true --wait
+# =============================================================================
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: dr-course-restore-01
+  namespace: velero
+spec:
+  backupName: dr-course-backup-01
+  namespaceMapping:
+    dr-demo: dr-demo-restore          # 備份裡的 dr-demo → 還原成 dr-demo-restore
+                                      # PVC/Secret/Service 裡的 namespace 都會跟著改寫
+  restorePVs: true                    # 會建立「全新」的 PV（新名字），不會碰原本 dr-demo 的 PV

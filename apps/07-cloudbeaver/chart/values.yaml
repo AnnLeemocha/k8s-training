@@ -1,0 +1,108 @@
+# cloudbeaver Helm Chart 預設值
+# 注意：namespace 不由這個 chart 建立，請先手動建立或套用
+# ../manifest/00-namespace.yaml，再用
+# `helm install cloudbeaver ./chart -n cloudbeaver` 安裝。
+#
+# 部署前，flarum/planka/peertube 這三個 namespace 各自的 NetworkPolicy
+# 都要先套用過允許 cloudbeaver 連進來的規則（已內建在那三個產品的
+# manifest 裡）。
+#
+# 下面每個欄位都標註「哪個 template 會用到」。這是全教材唯一「跨
+# namespace 存取」的產品：CloudBeaver 本身不存任何資料庫密碼（連線資訊
+# 由使用者登入後在網頁上輸入），純粹當三個資料庫的共用視覺化用戶端。
+
+# CloudBeaver 容器映像檔（templates/deployment.yaml）。
+image:
+  repository: dbeaver/cloudbeaver
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# 容器的資源請求/上限（templates/deployment.yaml）。CloudBeaver 是
+# JVM 應用，冷啟動較慢，資源抓得比同類單體應用寬（配合下面的
+# livenessProbe.initialDelaySeconds 拉長，見 templates/deployment.yaml）。
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1536Mi
+
+# Namespace 層級總量配額（templates/resourcequota.yaml）。
+resourceQuota:
+  enabled: true
+  requestsCpu: "500m"
+  requestsMemory: 1Gi
+  limitsCpu: "2"
+  limitsMemory: 2Gi
+  pods: "3"
+  persistentVolumeClaims: "2"
+  requestsStorage: 10Gi
+
+# Namespace 層級單一容器的地板/天花板（templates/resourcequota.yaml 裡
+# 的 LimitRange）。max 必須 ≥ resources.limits，min 必須
+# ≤ resources.requests——本教材曾在幫這個 namespace 加 Adminer 時，
+# 真的踩過 min 抓太高把合理的輕量容器擋掉的坑，後來改成把 DB 管理工具
+# 獨立在 cloudbeaver 這個產品，不再加進其他 namespace。
+limitRange:
+  enabled: true
+  default:
+    cpu: 500m
+    memory: 1Gi
+  defaultRequest:
+    cpu: 250m
+    memory: 512Mi
+  max:
+    cpu: "2"
+    memory: 2Gi
+  min:
+    cpu: 100m
+    memory: 256Mi
+
+# CloudBeaver 自己的工作區 PVC（templates/pvc.yaml），存放使用者設定、
+# 連線資訊（不含目標資料庫密碼）跟內建的 H2 中繼資料庫。用
+# rook-ceph-block（RWO）即可，單一 replica 單寫。
+persistence:
+  storageClassName: rook-ceph-block
+  size: 2Gi
+
+# port 是 ClusterIP Service 對外曝露的 port（templates/service.yaml），
+# containerPort 是 CloudBeaver 容器實際監聽的 port（8978），同時也是
+# NetworkPolicy allow-ingress 規則放行的 port（templates/networkpolicy.yaml）。
+service:
+  port: 80
+  containerPort: 8978
+
+# HTTPRoute 掛的 Gateway（templates/httproute.yaml）。
+gateway:
+  name: dev-gateway
+  namespace: default
+  sectionNames:
+    - http
+    - https
+
+# HTTPRoute 比對 Host header 用的網域（templates/httproute.yaml）。
+hostnames:
+  - cloudbeaver.nexai.org.com
+
+# NetworkPolicy（templates/networkpolicy.yaml）：default-deny 之後開三
+# 個口——Gateway 進來的 containerPort、DNS、以及對 databaseTargets 逐條
+# 展開的 egress 規則（用 namespaceSelector 比對目標 namespace 的內建
+# label kubernetes.io/metadata.name，不需要在對方 namespace 額外貼自訂
+# label）。databaseTargets 只列出「真的有網路 port 可連」的資料庫：
+# flarum 的 mysql（3306）、planka 跟 peertube 各自的 postgres（5432）；
+# 刻意排除 filebrowser 的 sqlite（沒有網路 port）、onlyoffice 內建的
+# postgres/redis/rabbitmq（沒有獨立 Service 曝露）、peertube 的
+# redis（key-value store，非 CloudBeaver 的使用情境）。
+# 對應地，flarum/planka/peertube 三個產品自己的 NetworkPolicy 也各加了
+# 一條 ingress 規則放行 cloudbeaver namespace 進來，兩邊要同時套用才會
+# 通。
+networkPolicy:
+  enabled: true
+  databaseTargets:
+    - namespace: flarum
+      port: 3306
+    - namespace: planka
+      port: 5432
+    - namespace: peertube
+      port: 5432

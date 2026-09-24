@@ -1,0 +1,105 @@
+# Step 7（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 教學重點：這個產品的零信任模式又跟前面不同——它是唯一一個「主動連到
+# 好幾個不同 namespace」的產品。egress 規則用 namespaceSelector 分別指到
+# flarum/planka/peertube 這三個 namespace（用叢集自動加上的
+# `kubernetes.io/metadata.name` 標籤比對，不用另外自訂標籤）。
+# 對應地，flarum/planka/peertube 各自的 NetworkPolicy 也都要各加一條
+# ingress 規則，放行「namespace 名稱是 cloudbeaver」的來源連進資料庫的
+# port——這三條規則已經加進那三個產品各自的 NetworkPolicy 檔案裡，
+# 部署這個產品前，那三個產品的 NetworkPolicy 也要重新 apply 一次。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: cloudbeaver
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-cloudbeaver-from-gateway
+  namespace: cloudbeaver
+spec:
+  # 只對帶 app: cloudbeaver 這個 label 的 Pod 生效（這裡就是應用程式本身）。
+  podSelector:
+    matchLabels:
+      app: cloudbeaver
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 8978 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 8978
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: cloudbeaver
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-cloudbeaver-to-databases
+  namespace: cloudbeaver
+spec:
+  # 只對 CloudBeaver 本身的 Pod 生效——egress 白名單只該給真正需要
+  # 連出去的容器，不要放到整個 namespace（podSelector: {}）。
+  podSelector:
+    matchLabels:
+      app: cloudbeaver
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector 用叢集自動加在每個 namespace 上的內建標籤
+    # `kubernetes.io/metadata.name` 來比對，不需要另外替 flarum/
+    # planka/peertube 這幾個 namespace 手動打標籤。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              # flarum 的 mysql 併在同一個 namespace 裡，走 3306。
+              kubernetes.io/metadata.name: flarum
+      ports:
+        - protocol: TCP
+          port: 3306
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              # planka 的 postgres 併在同一個 namespace 裡，走 5432。
+              kubernetes.io/metadata.name: planka
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              # peertube 有獨立的 postgres，也是走 5432。
+              kubernetes.io/metadata.name: peertube-app
+      ports:
+        - protocol: TCP
+          port: 5432

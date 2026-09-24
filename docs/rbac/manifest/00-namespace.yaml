@@ -1,0 +1,13 @@
+# Step 1：建立 RBAC 教學專用的 Namespace
+# 教學重點：這不是「第 8 個產品」，這裡沒有對外服務（沒有 Service/
+# HTTPRoute），純粹用來放 RBAC 練習用的 ServiceAccount/Role/ClusterRole，
+# 跟其他 7 個產品各自的 namespace 完全隔開，不影響任何已上線的應用。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rbac-demo
+  labels:
+    # 純標記用途，方便 `kubectl get ns -l xxx` 篩選，對 K8s 本身沒有
+    # 特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: rbac-demo

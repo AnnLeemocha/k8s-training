@@ -1,0 +1,264 @@
+# =============================================================================
+# 09-daily-backup-verification / manifest/02-scripts-configmap.yaml
+# 由腳本檔自動產生，請勿手動編輯；修改 script/*.sh 或 dr/script/check-data.sh 後重新產生：
+#
+#   kubectl -n dr-ops create configmap backup-verify-scripts \
+#     --from-file=script/notify.sh --from-file=script/backup-check.sh \
+#     --from-file=script/restore-test.sh --from-file=../script/check-data.sh \
+#     --dry-run=client -o yaml > manifest/02-scripts-configmap.yaml   （再補回這段註解）
+# =============================================================================
+apiVersion: v1
+data:
+  backup-check.sh: |
+    #!/usr/bin/env bash
+    # =============================================================================
+    # backup-check.sh — 每日檢查：最新一份排程備份存在、夠新、Completed、沒有 error
+    #
+    # 為什麼不是只看「備份失敗通知」：本叢集 09-17 ~ 09-21 連續 5 天「沒有產生備份」，
+    # 沒有失敗紀錄可以通知。所以要檢查的是「最新一份成功備份距今多久」—— 沒有就是告警。
+    #
+    # 環境變數：
+    #   SCHEDULE_NAME   要檢查的 Velero Schedule（預設 daily-full-backup）
+    #   MAX_AGE_HOURS   最新 Completed 備份最多可以多舊（預設 26 = 每日 + 2 小時緩衝）
+    #   CLUSTER_NAME    通知訊息中的叢集名稱
+    #   NOTIFY_SUCCESS  true = 成功也通知（預設 true，讓「沒收到訊息」本身也成為異常訊號）
+    #   WEBHOOK_URL     通知目的地（可選）
+    # 結束碼：通過 0、失敗 1（Job 會顯示 Failed，kubectl get jobs 一眼看出）
+    # =============================================================================
+    set -uo pipefail
+    DIR="$(cd "$(dirname "$0")" && pwd)"
+    S="${SCHEDULE_NAME:-daily-full-backup}"
+    MAX="${MAX_AGE_HOURS:-26}"
+    C="${CLUSTER_NAME:-k8s-training}"
+    NS=velero
+    PROBLEMS=()
+
+    # 1. BSL 是否可用（不可用 = 接下來的備份一定失敗）
+    BSL=$(kubectl -n $NS get backupstoragelocations.velero.io -o json \
+          | jq -r '.items[] | "\(.metadata.name)=\(.status.phase // "Unknown")"' | tr '\n' ' ')
+    BAD_BSL=$(kubectl -n $NS get backupstoragelocations.velero.io -o json \
+          | jq -r '.items[] | select(.status.phase != "Available") | .metadata.name')
+    echo "BSL: $BSL"
+    [ -n "$BAD_BSL" ] && PROBLEMS+=("BackupStorageLocation 不是 Available：$BSL")
+
+    # 2. Schedule 本身（注意一定要寫 schedules.velero.io，本叢集的 `schedules` 會拿到 Fleet 的資源）
+    SCHED_PHASE=$(kubectl -n $NS get schedules.velero.io "$S" -o jsonpath='{.status.phase}{" paused="}{.spec.paused}' 2>&1)
+    echo "Schedule $S: $SCHED_PHASE"
+    case "$SCHED_PHASE" in Enabled*) ;; *) PROBLEMS+=("Schedule $S 狀態異常：$SCHED_PHASE");; esac
+    echo "$SCHED_PHASE" | grep -q 'paused=true' && PROBLEMS+=("Schedule $S 被暫停")
+
+    # 3. 最新一份備份（不分狀態）與最新一份 Completed 備份
+    JSON=$(kubectl -n $NS get backups.velero.io -l velero.io/schedule-name="$S" -o json)
+    LATEST=$(echo "$JSON" | jq -c '[.items[]] | sort_by(.metadata.creationTimestamp) | last // empty')
+    LATEST_OK=$(echo "$JSON" | jq -c '[.items[] | select(.status.phase=="Completed")] | sort_by(.status.completionTimestamp) | last // empty')
+
+    if [ -z "$LATEST_OK" ]; then
+      PROBLEMS+=("找不到任何 Completed 的 $S 備份")
+    else
+      NAME=$(echo "$LATEST_OK" | jq -r .metadata.name)
+      DONE=$(echo "$LATEST_OK" | jq -r .status.completionTimestamp)
+      ERR=$(echo "$LATEST_OK" | jq -r '.status.errors // 0')
+      WARN=$(echo "$LATEST_OK" | jq -r '.status.warnings // 0')
+      ITEMS=$(echo "$LATEST_OK" | jq -r '"\(.status.progress.itemsBackedUp // 0)/\(.status.progress.totalItems // 0)"')
+      AGE_H=$(echo "$LATEST_OK" | jq -r '(now - (.status.completionTimestamp | fromdateiso8601)) / 3600 | floor')   # 用 jq 算，避免 busybox date 不吃 ISO 格式
+      echo "最新 Completed：$NAME 完成於 $DONE（${AGE_H}h 前）errors=$ERR warnings=$WARN items=$ITEMS"
+      [ "$AGE_H" -gt "$MAX" ] && PROBLEMS+=("最新成功備份 $NAME 已經 ${AGE_H} 小時（上限 ${MAX}h）")
+      [ "$ERR" != 0 ] && PROBLEMS+=("$NAME errors=$ERR")
+    fi
+    if [ -n "$LATEST" ]; then
+      LP=$(echo "$LATEST" | jq -r '.status.phase // "New"'); LN=$(echo "$LATEST" | jq -r .metadata.name)
+      case "$LP" in Completed|InProgress|New|Queued|WaitingForPluginOperations|Finalizing|FinalizingPartiallyFailed) ;;
+        *) PROBLEMS+=("最新一次備份 $LN 狀態為 $LP");; esac
+    fi
+
+    # 4. 結果與通知
+    if [ ${#PROBLEMS[@]} -eq 0 ]; then
+      [ "${NOTIFY_SUCCESS:-true}" = true ] && "$DIR/notify.sh" "✅ [$C] Velero 備份正常：$NAME（${AGE_H}h 前完成，items $ITEMS，warnings $WARN）"
+      exit 0
+    else
+      "$DIR/notify.sh" "❌ [$C] Velero 備份檢查失敗（schedule: $S）
+    $(printf -- '- %s\n' "${PROBLEMS[@]}")"
+      exit 1
+    fi
+  check-data.sh: |
+    #!/usr/bin/env bash
+    # =============================================================================
+    # check-data.sh — 用「實際資料」判斷還原是否成功，而不是看 Pod 狀態。
+    #
+    # 檢查三件事：
+    #   1. K8s 資源：Pod / Service / PVC 都在、PVC 是 Bound
+    #   2. 資料庫：disaster_test 表裡有 DR-TEST-DB-001
+    #   3. CephFS：/shared/dr-test.txt 內容含 DR-TEST-FS-001
+    # CephFS 用一個「只讀」的臨時 Pod 檢查，不依賴 cephfs-test-1/2 是否存在，
+    # 也避免 cephfs-test-1 重新啟動時重寫檔案、讓人誤以為資料有回來。
+    #
+    # 用法：./script/check-data.sh [namespace，預設 dr-demo]
+    #   還原到新 namespace 時：./script/check-data.sh dr-demo-restore
+    # 結束碼：全部通過 0，任一失敗 1（可放進自動化 Restore Test）
+    # =============================================================================
+    set -uo pipefail
+    NS="${1:-dr-demo}"
+    FAIL=0
+    pass() { echo "  [PASS] $*"; }
+    fail() { echo "  [FAIL] $*"; FAIL=1; }
+
+    echo "== 1. Kubernetes 資源（namespace: $NS）"
+    kubectl -n "$NS" get pods,svc,pvc 2>&1 | sed 's/^/     /'
+    for pvc in postgres-data shared-data; do
+      phase=$(kubectl -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null)
+      [ "$phase" = "Bound" ] && pass "PVC $pvc Bound" || fail "PVC $pvc 狀態=${phase:-不存在}"
+    done
+
+    echo "== 2. PostgreSQL 資料"
+    out=$(kubectl -n "$NS" exec deploy/postgres -- psql -U drtest -d drdemo -tAc \
+          "SELECT test_key FROM disaster_test WHERE test_key='DR-TEST-DB-001';" 2>&1)
+    if [ "$out" = "DR-TEST-DB-001" ]; then pass "disaster_test 查得到 DR-TEST-DB-001"
+    else fail "查不到 DR-TEST-DB-001（輸出：$out）"; fi
+
+    echo "== 3. CephFS 資料"
+    POD="cephfs-verify-$$"
+    kubectl -n "$NS" apply -f - >/dev/null <<YAML
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: $POD
+      namespace: $NS
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: verify
+          image: busybox:1.36
+          command: ["cat", "/shared/dr-test.txt"]
+          volumeMounts:
+            - { name: shared, mountPath: /shared, readOnly: true }
+      volumes:
+        - name: shared
+          persistentVolumeClaim: { claimName: shared-data, readOnly: true }
+    YAML
+    kubectl -n "$NS" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$POD" --timeout=180s >/dev/null 2>&1
+    content=$(kubectl -n "$NS" logs "$POD" 2>&1)
+    kubectl -n "$NS" delete pod "$POD" --wait=false >/dev/null 2>&1
+    if echo "$content" | grep -q "DR-TEST-FS-001"; then pass "dr-test.txt 含 DR-TEST-FS-001"
+    else fail "dr-test.txt 內容不符（輸出：$content）"; fi
+
+    echo
+    [ $FAIL = 0 ] && echo "結果：還原驗證通過 ✅" || echo "結果：還原驗證失敗 ❌"
+    exit $FAIL
+  notify.sh: |
+    #!/usr/bin/env bash
+    # notify.sh <訊息> —— 送到 WEBHOOK_URL（Slack / Mattermost / Google Chat 相容的 {"text": ...} 格式）
+    # WEBHOOK_URL 沒設定時只印到 stdout（Job log 仍看得到）。
+    set -uo pipefail
+    MSG="$1"
+    echo "$MSG"
+    [ -n "${WEBHOOK_URL:-}" ] || { echo "(未設定 WEBHOOK_URL，略過通知)"; exit 0; }
+    jq -n --arg t "$MSG" '{text: $t}' \
+      | curl -sS -m 15 -X POST -H 'Content-Type: application/json' --data-binary @- "$WEBHOOK_URL" \
+      || echo "通知送出失敗（不影響檢查結果）"
+  restore-test.sh: |
+    #!/usr/bin/env bash
+    # =============================================================================
+    # restore-test.sh — 自動化 Restore Test：把最新的排程備份「真的還原一次」並用資料驗證
+    #
+    # 流程：
+    #   1. 找出 SCHEDULE_NAME 最新一份 Completed 備份
+    #   2. 建立 Velero Restore：SOURCE_NS → TARGET_NS（namespaceMapping，不碰正在運作的應用）
+    #   3. 等 Restore 完成、等應用 Ready
+    #   4. 執行資料驗證腳本（預設 dr/script/check-data.sh，查 DR-TEST-DB-001 與 DR-TEST-FS-001）
+    #   5. 清除這次還原出來的資源（依 velero.io/restore-name label，只刪這次還原的東西）
+    #   6. 通知結果與實測耗時（= 這個應用的實測 RTO 參考值）
+    #
+    # 為什麼 TARGET_NS 要事先存在：RBAC 只在這個 namespace 給權限（Role），
+    # 不必給 Job 叢集層級的 exec / 刪除 namespace 權限。
+    #
+    # 環境變數：SCHEDULE_NAME(daily-full-backup) BACKUP_NAME(可選，指定備份) SOURCE_NS(dr-demo) TARGET_NS(dr-restore-test)
+    #           CHECK_SCRIPT(./check-data.sh) RESTORE_TIMEOUT_MIN(30) KEEP_ON_FAILURE(true)
+    #           CLUSTER_NAME WEBHOOK_URL
+    # =============================================================================
+    set -uo pipefail
+    DIR="$(cd "$(dirname "$0")" && pwd)"
+    S="${SCHEDULE_NAME:-daily-full-backup}"
+    SRC="${SOURCE_NS:-dr-demo}"
+    TGT="${TARGET_NS:-dr-restore-test}"
+    CHECK="${CHECK_SCRIPT:-$DIR/check-data.sh}"
+    TIMEOUT_MIN="${RESTORE_TIMEOUT_MIN:-30}"
+    C="${CLUSTER_NAME:-k8s-training}"
+    START=$(date +%s)
+    fail() { "$DIR/notify.sh" "❌ [$C] Restore Test 失敗（$SRC ← ${BACKUP:-?}）：$*"; exit 1; }
+
+    # 0. 目標 namespace 必須存在、而且是乾淨的（上一次失敗留下的資源要先處理）
+    kubectl get ns "$TGT" >/dev/null 2>&1 || fail "目標 namespace $TGT 不存在（請先 apply manifest/00-namespace-rbac.yaml）"
+    LEFT=$(kubectl -n "$TGT" get pvc,deploy -l velero.io/restore-name -o name 2>/dev/null | wc -l)
+    [ "$LEFT" -eq 0 ] || fail "$TGT 裡還有上一次還原留下的 $LEFT 個資源，請先檢查後清除"
+
+    # 1. 最新一份 Completed 備份，而且必須包含 SRC（includedNamespaces 為空或 * 或含 SRC）
+    # BACKUP_NAME 有設定時直接用（手動演練指定某一份備份），否則自動找排程的最新一份
+    BACKUP="${BACKUP_NAME:-}"
+    [ -n "$BACKUP" ] || BACKUP=$(kubectl -n velero get backups.velero.io -l velero.io/schedule-name="$S" -o json | jq -r --arg ns "$SRC" '
+      [.items[] | select(.status.phase=="Completed")
+                | select((.spec.includedNamespaces // ["*"]) as $i | ($i|index("*")) or ($i|index($ns)))]
+      | sort_by(.status.completionTimestamp) | last | .metadata.name // empty')
+    [ -n "$BACKUP" ] || fail "找不到包含 $SRC 的 Completed 備份"
+    echo "使用備份：$BACKUP"
+
+    # 2. 建立 Restore（等同 velero restore create --from-backup ... --namespace-mappings SRC:TGT）
+    R="restore-test-$(date +%Y%m%d%H%M%S)"
+    kubectl create -f - <<YAML || fail "建立 Restore 失敗"
+    apiVersion: velero.io/v1
+    kind: Restore
+    metadata:
+      name: $R
+      namespace: velero
+      labels:
+        training/restore-test: "true"
+    spec:
+      backupName: $BACKUP
+      includedNamespaces: ["$SRC"]
+      namespaceMapping:
+        $SRC: $TGT
+      restorePVs: true
+      itemOperationTimeout: ${TIMEOUT_MIN}m
+    YAML
+
+    # 3. 等 Restore 結束
+    PHASE=""
+    for _ in $(seq 1 $((TIMEOUT_MIN * 6))); do
+      PHASE=$(kubectl -n velero get restores.velero.io "$R" -o jsonpath='{.status.phase}')
+      case "$PHASE" in Completed|PartiallyFailed|Failed|FailedValidation) break;; esac
+      sleep 10
+    done
+    WARN=$(kubectl -n velero get restores.velero.io "$R" -o jsonpath='{.status.warnings}')
+    ERRS=$(kubectl -n velero get restores.velero.io "$R" -o jsonpath='{.status.errors}')
+    echo "Restore $R：phase=$PHASE warnings=${WARN:-0} errors=${ERRS:-0}"
+    [ "$PHASE" = Completed ] || fail "Restore $R 狀態為 ${PHASE:-逾時}（errors=${ERRS:-0}）"
+
+    # 等所有 Deployment Ready
+    kubectl -n "$TGT" wait deploy --all --for=condition=Available --timeout=600s \
+      || fail "Restore Completed 但 Deployment 沒有 Ready —— 典型的「有備份但救不回來」"
+
+    # 4. 資料驗證（看資料，不是看 Pod）
+    if "$CHECK" "$TGT"; then RESULT=PASS; else RESULT=FAIL; fi
+    DUR=$(( ($(date +%s) - START) / 60 ))
+
+    # 5. 清除本次還原的資源（只刪帶有這次 restore-name label 的東西；PV 隨 reclaimPolicy=Delete 回收）
+    if [ "$RESULT" = PASS ] || [ "${KEEP_ON_FAILURE:-true}" != true ]; then
+      kubectl -n "$TGT" delete all,pvc,secret,configmap,serviceaccount -l velero.io/restore-name="$R" --wait=true >/dev/null
+      echo "已清除 $TGT 中還原的資源"
+    else
+      echo "驗證失敗，保留 $TGT 中的資源供除錯（KEEP_ON_FAILURE=true）"
+    fi
+    # 只保留最近 5 次 restore-test 的 Restore 紀錄
+    kubectl -n velero get restores.velero.io -l training/restore-test=true -o json \
+      | jq -r '.items | sort_by(.metadata.creationTimestamp) | .[:-5][] .metadata.name' \
+      | xargs -r kubectl -n velero delete restores.velero.io >/dev/null
+
+    # 6. 通知
+    if [ "$RESULT" = PASS ]; then
+      "$DIR/notify.sh" "✅ [$C] Restore Test 通過：$SRC ← $BACKUP，資料驗證 PASS，耗時 ${DUR} 分鐘（實測 RTO 參考）"
+    else
+      fail "資料驗證未通過（耗時 ${DUR} 分鐘），資源保留在 $TGT"
+    fi
+kind: ConfigMap
+metadata:
+  name: backup-verify-scripts
+  namespace: dr-ops

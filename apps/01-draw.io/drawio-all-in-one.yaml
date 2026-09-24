@@ -1,0 +1,336 @@
+# draw.io — 完整合併版 manifest（單檔一次套用）
+#
+# 教學拆解版在 manifest/ 目錄（00~06 依序 apply，適合逐步講解）；
+# 這份是給「已經教完拆解版、要快速重建環境」或「demo 用」的合併版，
+# 內容與 manifest/ 目錄逐檔內容完全一致。
+#
+# 前置條件：先套用共用的 shared-infra/00-dev-gateway.yaml
+#
+# 用法：
+#   kubectl apply -f drawio-all-in-one.yaml
+# 清除：
+#   kubectl delete namespace drawio
+
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：Namespace 是叢集內邏輯隔離的最小單位，同一企業叢集中
+# 多個團隊/專案可用 Namespace 區隔資源、權限（RBAC）與配額（ResourceQuota）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: drawio
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: drawio
+---
+# Step 2：限制此 Namespace 可用的資源總量與單一容器預設值
+# 教學重點：
+#   - ResourceQuota：限制整個 namespace 能吃掉多少 CPU/Memory/Pod 數，
+#     避免單一團隊/專案把整個企業叢集資源耗盡（多租戶場景常見需求）。
+#   - LimitRange：當使用者忘記在 Pod 上寫 requests/limits 時，自動帶入預設值，
+#     並限制單一容器最大可申請的資源，避免「一個 Pod 要走全部節點資源」的情況。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: drawio-quota
+  namespace: drawio
+spec:
+  hard:
+    # requests.* 是「整個 namespace 承諾要保留給它的資源總和上限」——
+    # 排程器會用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    # limits.* 是「整個 namespace 所有容器最多能吃到的資源總和上限」，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod（含 Deployment/HPA 擴出來的）。
+    pods: "10"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: drawio-limitrange
+  namespace: drawio
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 250m
+        memory: 256Mi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）。
+      max:
+        cpu: "1"
+        memory: 1Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 50m
+        memory: 64Mi
+---
+# Step 3：部署 draw.io 應用程式本體
+# 教學重點：
+#   - Deployment 管理 ReplicaSet / Pod 的期望狀態與滾動更新策略。
+#   - draw.io 是「無狀態」應用（沒有需要持久保存的資料），
+#     所以是整堂課最單純的起點：不需要 PVC、不需要外部資料庫。
+#   - requests/limits：讓排程器知道該把 Pod 排到哪個節點，並避免吃光節點資源。
+#   - livenessProbe / readinessProbe：示範 K8s 如何自我修復（重啟不健康的容器）
+#     以及如何在 Pod 尚未就緒前，不讓 Service 把流量導進來。
+#   - securityContext：企業環境常見的容器安全基本盤（最小權限原則）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drawio
+  namespace: drawio
+  labels:
+    app: drawio
+spec:
+  # 期望維持幾個一模一樣的 Pod。
+  replicas: 2
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: drawio
+  strategy:
+    # RollingUpdate：更新時逐步汰換 Pod，不會一次全部砍掉（對照 Recreate）。
+    type: RollingUpdate
+    rollingUpdate:
+      # 更新時最多可以「多」出 1 個 Pod（先建新的，再砍舊的）。
+      maxSurge: 1
+      # 更新時最多允許「少」0 個 Pod，也就是更新過程中服務不中斷。
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: drawio
+    spec:
+      containers:
+        - name: drawio
+          image: jgraph/drawio:24.7.17
+          # IfNotPresent：節點上已有這個 image 就直接用，不重新拉取
+          # （多數情況省頻寬；若 tag 被覆寫過會抓不到新版，要改用 Always）。
+          imagePullPolicy: IfNotPresent
+          ports:
+            # 純宣告用途，方便用名稱 `http` 被下面的 probe/Service 引用，
+            # K8s 本身不會因為沒宣告而擋掉其他 port。
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            # requests：排程器保證一定拿得到的資源量，用來決定這個 Pod
+            # 會被排到哪個節點（節點剩餘容量必須 >= requests）。
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            # limits：容器實際執行時的資源封頂值，超過 CPU limit 會被
+            # 限流，超過 memory limit 會被 OOMKilled。
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # readinessProbe：探測「現在能不能收流量」，失敗只會把 Pod
+          # 從 Service 的 Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            # 容器啟動後等 10 秒才開始第一次探測，給應用程式開機時間。
+            initialDelaySeconds: 10
+            # 之後每 10 秒探測一次。
+            periodSeconds: 10
+            # 單次探測超過 3 秒沒回應就視為失敗。
+            timeoutSeconds: 3
+            # 連續失敗 3 次，才會被標記為 NotReady。
+            failureThreshold: 3
+          # livenessProbe：探測「容器是不是還活著」，失敗會直接重啟容器，
+          # 是比 readinessProbe 更激進的處置，數值通常要抓得比較保守。
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            # 禁止容器內程序透過 setuid 之類的手法拿到比原本更高的權限。
+            allowPrivilegeEscalation: false
+            capabilities:
+              # 把 Linux capabilities 全部收回，容器只保留一般使用者權限
+              # （最小權限原則；draw.io 本身不需要任何特殊 capability）。
+              drop:
+                - ALL
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 讓非 root 使用者也能讀寫（draw.io 這裡沒有掛 Volume，寫出來
+        # 是為了跟其他有 PVC 的產品保持一致的教學範例）。
+        fsGroup: 1000
+---
+# Step 4：建立 ClusterIP Service，作為 Pod 的穩定進入點
+# 教學重點：Pod 會因為重啟/滾動更新而換 IP，Service 透過 label selector
+# 提供一個穩定的虛擬 IP + DNS 名稱（drawio.drawio.svc.cluster.local）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: drawio
+  namespace: drawio
+  labels:
+    app: drawio
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute，不需要也不應該在這裡開 NodePort/LoadBalancer。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: drawio
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；這裡用名稱 http，對應
+      # Deployment 裡 containerPort 宣告的 name，不用寫死數字 8080。
+      targetPort: http
+---
+# Step 5：對外曝露服務
+# 教學重點：這座叢集用的是 Gateway API（Cilium Gateway Controller），
+# 不是傳統的 Ingress/Ingress-nginx，這是目前 K8s 社群的新標準，值得跟學員說明兩者差異。
+#
+# 這裡掛的是教學專用的 dev-gateway（見 ../../shared-infra/00-dev-gateway.yaml），
+# 上課前要先套用過那份共用資源，dev-gateway 才會存在。
+# http/https 兩個監聽器都掛，https 會用叢集既有的 *.nexai.org.com 自簽憑證
+# （瀏覽器會出現不受信任警告，屬預期行為，可藉機講 TLS 憑證鏈）。
+#
+# !!! hostname 請依實際可用網域調整，並確認 DNS/hosts 有指向 dev-gateway 的 EXTERNAL-IP !!!
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: drawio
+  namespace: drawio
+spec:
+  # 這個 HTTPRoute 要掛到哪個/哪些 Gateway 的哪個 listener 上；
+  # 兩筆都掛代表 http 跟 https 的流量都會被導進來。
+  parentRefs:
+    - name: dev-gateway
+      namespace: default
+      sectionName: http
+    - name: dev-gateway
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手
+  # （同一個 Gateway 可以同時掛很多產品，靠 hostname 分流）。
+  hostnames:
+    - "drawio.nexai.org.com"
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品
+            # （對照 Exact，可用來做更精細的路徑分流）。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 03-service.yaml）。
+        - name: drawio
+          port: 80
+---
+# Step 6（進階）：水平自動擴縮
+# 教學重點：HPA 依據 CPU 使用率（來自 metrics-server，此叢集已安裝）
+# 動態調整 replicas。可以在課堂上用 `kubectl run` + hey/ab 對 Service 施壓，
+# 實際觀察 replicas 從 2 -> 更多的過程。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: drawio
+  namespace: drawio
+spec:
+  # 要對哪個工作負載做自動擴縮。
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: drawio
+  # 不管流量多低，都至少維持 2 個 replicas（對照 Deployment 原本的
+  # replicas: 2，HPA 接手後這個欄位才是真正生效的下限）。
+  minReplicas: 2
+  # 流量再高，也最多只擴到 5 個 replicas，避免把 ResourceQuota 吃光。
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          # Utilization：跟「容器 requests 設的 CPU」比較的使用率百分比，
+          # 不是跟節點總 CPU 比。
+          type: Utilization
+          # 所有 Pod 的平均 CPU 使用率超過 requests 的 70% 就觸發擴容，
+          # 低於就慢慢縮容（縮容有內建的冷卻時間，不會瞬間砍下去）。
+          averageUtilization: 70
+---
+# Step 7（進階、選用）：NetworkPolicy 零信任網路示範
+# 教學重點：預設 K8s 網路是「全通」，企業場景通常要求最小權限：
+#   1) 先 default-deny 所有 ingress / egress
+#   2) 只開放必要的路徑（DNS 查詢、Gateway 進來的流量、同 namespace 內部溝通）
+#
+# !!! 上課前請務必先實測 !!!
+# 這座叢集用 Cilium 實作 Gateway API，Gateway 送進 Pod 的流量在 NetworkPolicy
+# 眼中仍視為「叢集內流量」，理論上會被下面的 allow-ingress-from-gateway 放行；
+# 但實際行為會因 Cilium 版本/設定而略有差異，建議正式上課前先驗證
+# `kubectl apply` 後 HTTPRoute 是否仍可正常連線，避免當場示範失敗。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: drawio
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面兩份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-gateway
+  namespace: drawio
+spec:
+  # 只對帶 app: drawio 這個 label 的 Pod 生效（這裡就是應用程式本身）。
+  podSelector:
+    matchLabels:
+      app: drawio
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 8080 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: drawio
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

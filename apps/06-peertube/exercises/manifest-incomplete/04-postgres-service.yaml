@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: peertube
+  labels:
+    app: postgres
+spec:
+  # clusterIP: None 讓這個 Service 不配虛擬 IP，DNS 查詢
+  # （postgres.peertube.svc.cluster.local）會直接回傳 Pod IP，是搭配
+  # StatefulSet 的標準用法，確保 Pod 有穩定、可預期的網路身分。
+  clusterIP: __FILL_ME_13__
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: __FILL_ME_14__
+  ports:
+    - name: postgres
+      port: 5432
+      # 對應下面 StatefulSet 裡 containerPort 宣告的 name，
+      # 不用寫死數字 5432。
+      targetPort: __FILL_ME_15__

@@ -1,0 +1,131 @@
+<mxfile host="app.diagrams.net" modified="2026-09-22T00:00:00.000Z" agent="k8s-training" version="24.7.17" type="device">
+  <diagram id="onlyoffice-arch" name="onlyoffice K8s Architecture">
+    <mxGraphModel dx="1500" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="1050" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Client -->
+        <mxCell id="client" value="學員瀏覽器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="460" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- default namespace group -->
+        <mxCell id="nsDefault" value="namespace: default (shared-infra)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="260" y="420" width="220" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="gateway" value="dev-gateway&#10;(Gateway API / Cilium)&#10;http :80 + https :443" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="285" y="460" width="170" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- onlyoffice namespace group -->
+        <mxCell id="nsOnlyoffice" value="namespace: onlyoffice" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="560" y="40" width="860" height="760" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rq" value="ResourceQuota + LimitRange&#10;(namespace 資源治理，實測用量遠低於官方建議 2CPU/4GB)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="590" y="80" width="280" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="secret" value="Secret: onlyoffice-secret&#10;JWT_SECRET" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="900" y="80" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="route" value="HTTPRoute: onlyoffice&#10;host: onlyoffice.nexai.org.com" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="590" y="460" width="190" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="svc" value="Service: onlyoffice&#10;ClusterIP :80 -&gt; :80" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="840" y="460" width="180" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- gpu01 node group -->
+        <mxCell id="nodeGpu01" value="Node: gpu01（記憶體使用率最低 ~24%，帶 nvidia.com/gpu=true:NoSchedule taint）" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#eeeeee;strokeColor=#36393d;dashed=1;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="220" width="320" height="420" as="geometry" />
+        </mxCell>
+
+        <mxCell id="deploy" value="Deployment: onlyoffice (replicas=1)&#10;pinned to gpu01 via nodeSelector + toleration" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f8f8f8;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1105" y="260" width="270" height="360" as="geometry" />
+        </mxCell>
+        <mxCell id="pod1" value="Pod&#10;onlyoffice/documentserver:latest&#10;:80&#10;（內建 nginx/docservice/&#10;postgres/redis/rabbitmq，&#10;皆非獨立 K8s 資源）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="300" width="230" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="pluginsNote" value="⚠️ PLUGINS_ENABLED=false：預設會嘗試連 github.com 下載外掛，&#10;被 NetworkPolicy 擋掉會卡在重試迴圈、吃滿 ~1 核 CPU" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;dashed=1;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="460" width="230" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="pvc" value="PVC: onlyoffice-data&#10;/var/www/onlyoffice/Data&#10;(RWO, rook-ceph-block)&#10;log/lib 用 emptyDir" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="540" width="230" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="np" value="NetworkPolicy&#10;default-deny + 放行 Gateway ingress :80 / DNS egress :53&#10;+ egress → filebrowser namespace :80（雙向整合）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="590" y="700" width="620" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="client" target="gateway">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1label" value="HTTPS (Host: onlyoffice.nexai.org.com)" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e1">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="gateway" target="route">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2label" value="parentRefs" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e2">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="route" target="svc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3label" value="backendRefs :80" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e3">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="svc" target="pod1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4label" value="selector app=onlyoffice" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e4">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="pod1" target="pvc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5label" value="mount /var/www/onlyoffice/Data" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e5">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="secret" target="deploy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6label" value="JWT_SECRET (secretKeyRef)" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e6">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="rq" target="deploy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7label" value="限制整個 namespace 用量" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e7">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="np" target="deploy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8label" value="只放行 Gateway ingress + DNS egress（github.com 沒開白名單）" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e8">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="deploy" target="nodeGpu01">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9label" value="nodeSelector: kubernetes.io/hostname=gpu01&#10;+ toleration: nvidia.com/gpu=true:NoSchedule" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e9">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

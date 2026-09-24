@@ -1,0 +1,12 @@
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：Namespace 是叢集內邏輯隔離的最小單位，同一企業叢集中
+# 多個團隊/專案可用 Namespace 區隔資源、權限（RBAC）與配額（ResourceQuota）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __FILL_ME_1__
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: __FILL_ME_2__

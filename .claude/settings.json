@@ -1,0 +1,8 @@
+{
+    "permissions": {
+        "allow": [
+            "Bash(kubectl scale *)",
+            "Bash(kubectl delete hpa *)"
+        ]
+    }
+}

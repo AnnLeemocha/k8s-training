@@ -1,0 +1,33 @@
+# 前置條件：先套用 ../../shared-infra/00-dev-gateway.yaml
+# 注意：hostnames 這裡要跟 04-deployment.yaml 的 FORUM_URL 一致，
+# 不然 Flarum 產生的靜態資源網址會跟實際存取網址對不上。
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: flarum
+  namespace: flarum
+spec:
+  # 這個 HTTPRoute 要掛到哪個/哪些 Gateway 的哪個 listener 上；
+  # 兩筆都掛代表 http 跟 https 的流量都會被導進來。
+  parentRefs:
+    - name: __FILL_ME_28__
+      namespace: default
+      sectionName: http
+    - name: __FILL_ME_28__
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手（同一個
+  # Gateway 可以同時掛很多產品，靠 hostname 分流）；務必跟上面提醒的
+  # FORUM_URL 保持一致。
+  hostnames:
+    - __FILL_ME_29__
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 08-flarum-service.yaml）。
+        - name: flarum
+          port: __FILL_ME_30__

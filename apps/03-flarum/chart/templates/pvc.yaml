@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "flarum.name" . }}-storage
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flarum.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.persistence.storage.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.storage.size }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "flarum.name" . }}-assets
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flarum.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: {{ .Values.persistence.assets.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.assets.size }}

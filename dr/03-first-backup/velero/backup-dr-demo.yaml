@@ -1,0 +1,44 @@
+# =============================================================================
+# 03-first-backup / velero/backup-dr-demo.yaml
+# 「第一次備份」的 Backup CR —— 等同 UI 精靈送出的內容，也等同：
+#   velero backup create dr-demo-backup-01 --include-namespaces dr-demo --snapshot-move-data
+#
+# 不管用 UI、CLI 還是 yaml，最後都是在 velero namespace 建立一個 Backup 物件，
+# Velero controller 看到後開始工作。所以「UI 按了什麼」一定能用
+# `kubectl -n velero get backup <name> -o yaml` 對照回來。
+# =============================================================================
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: dr-demo-backup-01             # 備份名稱：建議含應用名 + 序號/日期，還原時要靠它找
+  namespace: velero                   # Backup CR 一律建在 Velero 所在 namespace
+  labels:
+    training/unit: "03"               # 自訂 label，方便 `velero backup get -l training/unit=03`
+spec:
+  # ---- 範圍：哪些 namespace ----
+  includedNamespaces:
+    - dr-demo                         # 只備份 dr-demo；["*"] = 全部 namespace
+  # excludedNamespaces: []            # 搭配 "*" 使用，例如排除 kube-system
+
+  # ---- 範圍：哪些資源種類 ----
+  # includedResources: ["*"]          # 預設全部；也可寫 deployments,secrets,persistentvolumeclaims
+  # excludedResources: []             # 例如排除 events（單元 5 會故意排除 secrets 看後果）
+  # includeClusterResources: null     # null(預設)=自動：只帶上跟 namespace 相關的 cluster 資源（PV、CRD）
+  #                                   # true = 連整座叢集的 cluster-scoped 資源都帶（實測 921 個物件！）
+
+  # ---- 範圍：label 篩選（注意：套用在「每一個資源」上）----
+  # labelSelector:
+  #   matchLabels:
+  #     app: postgres                 # 實測：Deployment/Secret/Service 沒有這個 label → 不會被備份！
+
+  # ---- Volume 資料 ----
+  snapshotVolumes: true               # 對 PVC 做 CSI VolumeSnapshot
+  snapshotMoveData: true              # 把快照內容用 Data Mover(kopia) 搬到 Object Storage；
+                                      # false = 快照只留在 Ceph 裡，叢集/Ceph 一掛就沒了
+  defaultVolumesToFsBackup: false     # true = 改用 File System Backup（node-agent 直接讀 Pod 掛載目錄）
+                                      # 本叢集 Ceph 支援 CSI Snapshot，所以不需要
+
+  storageLocation: default            # 寫到哪個 BackupStorageLocation（單元 2）
+  ttl: 720h0m0s                       # 保留 30 天；到期 Velero 自動刪除 CR + S3 上的檔案 + 快照資料
+  csiSnapshotTimeout: 10m0s           # 等 CSI 快照 ReadyToUse 的上限
+  itemOperationTimeout: 4h0m0s        # 等 Data Mover 上傳完成的上限（資料量大要調高）

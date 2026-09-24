@@ -1,0 +1,26 @@
+# Step 6：建立 ClusterIP Service，作為 Pod 的穩定進入點
+# 教學重點：Pod 會因為重啟（尤其這裡的 strategy: Recreate）而換 IP，
+# Service 透過 label selector 提供一個穩定的虛擬 IP + DNS 名稱
+# （filebrowser.filebrowser.svc.cluster.local，也是 03-configmap.yaml
+# 的 server.internalUrl 指到的目標）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: filebrowser
+  namespace: filebrowser
+  labels:
+    app: filebrowser
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute，不需要也不應該在這裡開 NodePort/LoadBalancer。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: __FILL_ME_18__
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；用名稱 http 對應 Deployment 裡
+      # containerPort 宣告的 name，不用寫死數字。
+      targetPort: __FILL_ME_19__

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: peertube
+description: PeerTube — K8s 教育訓練用 Helm Chart（PostgreSQL + Redis + App，最完整的整合範例）
+type: application
+version: 0.1.0
+appVersion: "production-bookworm"

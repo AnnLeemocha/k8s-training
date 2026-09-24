@@ -1,0 +1,129 @@
+# Step 5：部署 FileBrowser Quantum 本體
+# 教學重點：
+#   - replicas 刻意只給 1：跟舊版一樣，設定/使用者資料庫還是 sqlite，
+#     不支援多個行程同時寫入，「不是所有應用都能無腦水平擴展」的結論
+#     沒有因為換版本而改變。
+#   - image 換成 `gtstef/filebrowser:1.5.6-stable`（FileBrowser Quantum
+#     官方標記的穩定線，非 v2.0.0 beta），原因見 ../README.md。
+#   - 不再用環境變數決定行為，改成掛載 03-configmap.yaml 產生的
+#     config.yaml。**實測發現的坑**：這個 image 的 entrypoint 不會把
+#     `args` 裡的 `-c <path>` 轉發給底層執行檔，一律回頭找
+#     `/home/filebrowser/data/config.yaml`（官方文件說的「推薦掛法」預設
+#     路徑），就算 command/args 寫了 `-c` 也一樣，實測會直接 FATAL
+#     找不到檔案。解法：不跟 entrypoint 對抗，改用 `subPath` 把
+#     ConfigMap 的 config.yaml 直接疊到這個預設路徑上。
+#   - volumeMounts 對應到 02-pvc.yaml 建立的兩顆 PVC：
+#     /srv 掛 filebrowser-srv（檔案本體，跟舊版路徑一致，沒有改變），
+#     /home/filebrowser/data 掛 filebrowser-db（sqlite 資料庫 + 快取），
+#     這是 Quantum 官方文件建議的持久化資料目錄，config.yaml 也疊在
+#     這顆 PVC 底下的同一個路徑裡。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: filebrowser
+  namespace: filebrowser
+  labels:
+    app: filebrowser
+spec:
+  # 期望維持幾個一模一樣的 Pod；固定為 1，理由見上方檔頭
+  # （sqlite 資料庫不支援多個行程同時寫入）。
+  replicas: 1
+  strategy:
+    # Recreate：更新時先砍光所有舊 Pod，才建立新 Pod，過程中會有短暫
+    # 服務中斷（對照 draw.io 用的 RollingUpdate 邊建新邊砍舊）。
+    # 這裡刻意選它，是因為同一份 sqlite 資料庫檔案不能同時被新舊兩個
+    # Pod 掛著寫入，用 RollingUpdate 反而會造成資料庫鎖死/損毀風險。
+    type: RollingUpdate
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: filebrowser
+  template:
+    metadata:
+      labels:
+        app: filebrowser
+    spec:
+      containers:
+        - name: filebrowser
+          image: gtstef/filebrowser:1.5.6-stable
+          # IfNotPresent：節點上已有這個 image 就直接用，不重新拉取。
+          imagePullPolicy: IfNotPresent
+          ports:
+            # 純宣告用途，方便用名稱 `http` 被下面的 probe/Service 引用。
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          resources:
+            # requests：排程器保證一定拿得到的資源量，用來決定這個 Pod
+            # 會被排到哪個節點。
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            # limits：容器實際執行時的資源封頂值，超過 CPU limit 會被
+            # 限流，超過 memory limit 會被 OOMKilled。
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          # readinessProbe：探測「現在能不能收流量」，失敗只會把 Pod
+          # 從 Service 的 Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            # 容器啟動後等 5 秒才開始第一次探測（Quantum 開機快，
+            # 關掉 disableUpdateCheck 後不用等太久）。
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          # livenessProbe：探測「容器是不是還活著」，失敗會直接重啟容器，
+          # 是比 readinessProbe 更激進的處置，數值抓得比 readiness 保守
+          # （initialDelaySeconds/periodSeconds 都更長，避免誤殺）。
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          securityContext:
+            # 禁止容器內程序透過 setuid 之類的手法拿到比原本更高的權限。
+            allowPrivilegeEscalation: false
+            capabilities:
+              # 把 Linux capabilities 全部收回，容器只保留一般使用者權限
+              # （最小權限原則）。
+              drop:
+                - ALL
+          volumeMounts:
+            # 檔案本體（RWX），對應 02-pvc.yaml 的 filebrowser-srv，
+            # 路徑跟 03-configmap.yaml 的 server.sources[0].path 一致。
+            - name: srv
+              mountPath: /srv
+            # sqlite 資料庫 + 快取（RWO），對應 02-pvc.yaml 的 filebrowser-db，
+            # 路徑跟 03-configmap.yaml 的 server.database/cacheDir 一致。
+            - name: db
+              mountPath: /home/filebrowser/data
+            # 用 subPath 把 ConfigMap 裡的 config.yaml 這「一個檔案」疊到
+            # filebrowser-db 這顆 PVC 裡的同一路徑上，而不是把整個目錄換成
+            # ConfigMap（那樣會蓋掉 sqlite 資料庫檔案）。這是繞開這個
+            # image entrypoint 只認固定路徑的解法，細節見上方檔頭。
+            - name: config
+              mountPath: /home/filebrowser/data/config.yaml
+              subPath: config.yaml
+              # 設定檔不需要、也不應該被容器內程序改寫。
+              readOnly: true
+      securityContext:
+        # Pod 層級：兩顆 PVC 掛進來的檔案會被強制改成這個 group 擁有，
+        # 讓非 root 使用者也能讀寫。
+        fsGroup: 1000
+      volumes:
+        - name: srv
+          persistentVolumeClaim:
+            claimName: filebrowser-srv
+        - name: db
+          persistentVolumeClaim:
+            claimName: filebrowser-db
+        - name: config
+          configMap:
+            name: filebrowser-config

@@ -1,0 +1,838 @@
+# peertube — 完整合併版 manifest（單檔一次套用）
+#
+# 教學拆解版在 manifest/ 目錄（00~12 依序 apply，適合逐步講解）；
+# 這份是給「已經教完拆解版、要快速重建環境」或「demo 用」的合併版，
+# 內容與 manifest/ 目錄逐檔內容完全一致。
+#
+# 前置條件：先套用共用的 ../shared-infra/00-dev-gateway.yaml
+# 注意：postgres/redis/peertube 三個 Pod 都用 nodeSelector 排到
+# gpu01（這座叢集其他節點記憶體吃緊），上課前請確認
+# `kubectl top node gpu01` 還有餘裕。
+#
+# 用法：
+#   kubectl apply -f peertube-all-in-one.yaml
+# 清除：
+#   kubectl delete namespace peertube
+
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：這是課程最後、最複雜的一個範例，一次整合前面學過的所有
+# 概念——StatefulSet（PostgreSQL/Redis）、Secret、PVC、initContainer
+# 的變形（ConfigMap 掛載初始化腳本）、跨元件的 NetworkPolicy、
+# 以及資源緊繃叢集的節點排程。PostgreSQL/Redis 都是 Peertube 專屬、
+# 跟這個 namespace 綁在一起（呼應 planka 的架構，而不是 mysql 的
+# 共用架構）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: peertube
+  labels:
+    # 純標記用途，方便用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: peertube
+---
+# Step 2：資源配額與預設值
+# 這個 namespace 同時裝了 PostgreSQL、Redis、PeerTube 本體三個 Pod。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: peertube-quota
+  namespace: peertube
+spec:
+  hard:
+    # requests.* 是「整個 namespace 承諾要保留給它的資源總和上限」——
+    # 排程器會用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "2"
+    requests.memory: 3Gi
+    # limits.* 是「整個 namespace 所有容器最多能吃到的資源總和上限」，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "4"
+    limits.memory: 6Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod。
+    pods: "6"
+    # 這個 namespace 最多能建立幾張 PVC——postgres（1）+ peertube 影片儲存
+    # （1）就佔了 2 張，留一點餘裕給學員實驗用。
+    persistentvolumeclaims: "4"
+    # 所有 PVC 加總起來最多能申請多少儲存空間（跟上面 pvc 數量上限是
+    # 兩個獨立的維度：一個管「幾張」，一個管「總容量」）。
+    requests.storage: 30Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: peertube-limitrange
+  namespace: peertube
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 500m
+        memory: 1Gi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）——
+      # 這裡刻意設得比較寬（對照 drawio 的 1 core/1Gi），因為 peertube
+      # 本體單一容器的 limits 就要到 2 core/2Gi，比一般無狀態應用吃更多。
+      max:
+        cpu: "2"
+        memory: 3Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 50m
+        memory: 64Mi
+---
+# Step 3：PostgreSQL 的密碼
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: peertube
+type: Opaque
+stringData:
+  # 以下三個 key 名稱是官方 postgres image 的慣例環境變數，容器啟動時
+  # 會讀這幾個變數來建立對應的使用者/密碼/資料庫（見 05 的 envFrom）。
+  POSTGRES_USER: "peertube"
+  POSTGRES_PASSWORD: "TrainingPeertube123"
+  POSTGRES_DB: "peertube"
+---
+# Step 4：PeerTube 官方文件要求資料庫要先啟用兩個 PostgreSQL extension
+# （pg_trgm 做模糊搜尋、unaccent 做去重音搜尋），沒有的話 PeerTube
+# 首次啟動跑 migration 會直接失敗。
+# 教學重點：官方 postgres image 有個慣例——啟動時如果資料目錄是
+# 「第一次初始化」，會自動執行 /docker-entrypoint-initdb.d/ 底下所有
+# .sql / .sh 檔。這裡用 ConfigMap 掛一支初始化 SQL 進去，
+# 不用進容器手動下指令，示範「ConfigMap 也可以拿來放初始化腳本」，
+# 跟前面用 Secret 放密碼是同一種掛載機制的不同用途。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-initdb
+  namespace: peertube
+data:
+  # 這裡的 key 名稱 init-extensions.sql，掛進 Pod 之後會變成
+  # /docker-entrypoint-initdb.d/init-extensions.sql 這個檔案，
+  # 副檔名要是 .sql/.sh，entrypoint 才認得要執行它。
+  init-extensions.sql: |
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    CREATE EXTENSION IF NOT EXISTS unaccent;
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: peertube
+  labels:
+    app: postgres
+spec:
+  # clusterIP: None 讓這個 Service 不配虛擬 IP，DNS 查詢
+  # （postgres.peertube.svc.cluster.local）會直接回傳 Pod IP，是搭配
+  # StatefulSet 的標準用法，確保 Pod 有穩定、可預期的網路身分。
+  clusterIP: None
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      # 對應下面 StatefulSet 裡 containerPort 宣告的 name，
+      # 不用寫死數字 5432。
+      targetPort: postgres
+---
+# Step 5：PostgreSQL StatefulSet
+# 教學重點：
+#   - nodeSelector/toleration 排到 gpu01：延續 onlyoffice 的做法。
+#     這座叢集 k8s01~03 記憶體已經很緊繃，PeerTube 這組（postgres +
+#     redis + app 三個 Pod）乾脆整組都排到記憶體較寬裕的 gpu01，
+#     避免又把其他共用工作負載擠爆。
+#   - 沿用 mysql/planka 學到的教訓：不 drop capabilities、PGDATA
+#     指到子目錄避開 lost+found 問題。
+#   - initdb ConfigMap：見 03-postgres-initdb-configmap.yaml。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: peertube
+spec:
+  # 要跟哪個 Headless Service（04-postgres-service.yaml）搭配，
+  # 決定 Pod 的 DNS 名稱格式（postgres-0.postgres.peertube...）。
+  serviceName: postgres
+  # 一般 PostgreSQL 沒有內建多主複寫，多開幾個 replicas並不會變成
+  # 一個資料庫叢集，只會變成好幾個各自獨立、資料不同步的 PostgreSQL，
+  # 所以固定只開 1。
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # 見上方教學重點：整組（postgres/redis/peertube）都刻意排到
+      # 記憶體較寬裕的 gpu01，避免擠爆其他共用工作負載。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      # gpu01 平常帶有 NoSchedule taint（保留給 GPU 工作負載），這裡要
+      # 明確容忍這個 taint，Pod 才排得上去。
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine
+          # 把 02-postgres-secret.yaml 的 POSTGRES_USER/PASSWORD/DB
+          # 三個 key 整包注入成環境變數，官方 image 靠這幾個變數名稱
+          # 完成初始化。
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            # 把資料目錄指到 data 這顆 PVC 底下的子目錄 pgdata，而不是
+            # 直接用掛載點根目錄——避開 Kubernetes 幫某些儲存後端自動
+            # 建立的 lost+found 目錄讓 initdb 誤判「目錄非空」而失敗
+            # 的問題（跟 mysql/planka 踩過的坑同一類）。
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            # 純宣告用途，方便用名稱 postgres 被下面的 probe/Service 引用。
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # readinessProbe：用 postgres 官方內建的 pg_isready 工具檢查
+          # 資料庫是否已經能接受連線，失敗只會把 Pod 從 Service
+          # Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # livenessProbe：只做最簡單的 TCP 連線測試（不像 readiness 會
+          # 真的問資料庫狀態），失敗會直接重啟容器，數值抓得比較保守，
+          # 避免資料庫還在跑 initdb ConfigMap 那段 SQL 時就被砍掉。
+          livenessProbe:
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            # 注意：這裡沒有 drop capabilities——官方 postgres image 的
+            # entrypoint 以 root 啟動後，需要用 capabilities 把檔案/目錄
+            # 權限改成內部的 postgres 使用者才能啟動，跟 mysql/flarum
+            # 是同一類「資料庫官方 image 不能亂套用同一套 hardening」
+            # 的實務案例。
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # 掛進 /docker-entrypoint-initdb.d/，官方 image 的 entrypoint
+            # 會在「資料目錄第一次初始化」時自動執行這裡面的 .sql/.sh，
+            # 對應 03-postgres-initdb-configmap.yaml。
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 999 是 postgres 官方 image 內建的 postgres 使用者 gid，
+        # 讓非 root 使用者也能讀寫資料目錄。
+        fsGroup: 999
+      volumes:
+        - name: initdb
+          configMap:
+            name: postgres-initdb
+  # StatefulSet 專屬欄位：每個 Pod（postgres-0）各自拿到專屬的 PVC，
+  # 並且 Pod 重建後會重新綁定「同一顆」PVC，這是跟 Deployment
+  # 最大的不同（對照 06-redis.yaml 的 emptyDir 用法）。
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: rook-ceph-block
+        resources:
+          requests:
+            storage: 5Gi
+---
+# Step 6：Redis（PeerTube 用來做背景工作佇列 job queue 與短期快取）
+# 教學重點：這裡故意跟 postgres 用不同的資源類型組合——
+#   - postgres：StatefulSet + PVC，因為影片/使用者資料是「不能弄丟」
+#     的資料。
+#   - redis：Deployment + emptyDir，因為這裡存的是任務佇列/快取，
+#     Pod 重建掉了頂多是背景工作要重跑，不是不可回復的資料遺失。
+#   同樣是「資料庫類」服務，該不該用 PVC、該不該用 StatefulSet，
+#   要看資料本身的重要性，不是看「這是不是資料庫」這個表面分類。
+# 沒有設密碼：僅限教學環境內部使用，靠 NetworkPolicy 做存取控制，
+# 正式環境請開 requirepass。
+# 實測踩到的坑（跟 mysql 一樣的教訓）：官方 redis image 預設雖然是用
+# 非 root 的 redis 使用者跑，但 entrypoint 仍會先以 root 對工作目錄
+# 執行一次 chown，drop 掉全部 capabilities 會讓這個 chown 失敗
+# （`chown: . : Operation not permitted`），容器直接啟動失敗。
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: peertube
+  labels:
+    app: redis
+spec:
+  # 跟 postgres 一樣用 Headless Service（DNS 直接回傳 Pod IP），
+  # 這裡雖然背後是 Deployment 不是 StatefulSet，但 replicas 固定為 1，
+  # 純粹拿來當內部服務發現用，跟一般 ClusterIP Service 的差別
+  # 在這個場景下不明顯。
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: peertube
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  # Recreate：更新時先砍掉舊 Pod 再建新的（對照 RollingUpdate 會兩個
+  # Pod 並存一小段時間）。這裡資料放在 emptyDir，emptyDir 綁定的是
+  # 「這個 Pod」，新舊 Pod 同時存在也不會共用/搬移同一份資料，
+  # 用 Recreate 純粹是避免瞬間有兩個 redis 容器同時存在造成混淆，
+  # 短暫的服務中斷在教學環境可接受。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # 跟 postgres 排到同一台 gpu01，理由同 05-postgres-statefulset.yaml。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          ports:
+            # 純宣告用途，方便用名稱 redis 被上面的 Service/下面的
+            # probe 引用。
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          # readinessProbe：直接用 redis-cli ping 確認伺服器有回應，
+          # 失敗只會把 Pod 從 Service Endpoints 移除。
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # livenessProbe：單純 TCP 連線測試，失敗會直接重啟容器。
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            # 注意：這裡沒有 drop capabilities（見上方教學重點的實測
+            # 說明）——官方 redis image 的 entrypoint 會先以 root 對
+            # 工作目錄執行一次 chown 再切換成 redis 使用者，drop 掉
+            # capabilities 會讓這個 chown 失敗、容器啟動不了。
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        # emptyDir：資料跟著這個 Pod 的生命週期，Pod 被刪除/重新排程
+        # 到別的節點就會清空——對照 postgres 用 volumeClaimTemplates
+        # 接上 PVC，這正是上方教學重點講的「該不該用 PVC 要看資料
+        # 重不重要，不是看是不是資料庫」的具體示範。
+        - name: data
+          emptyDir: {}
+---
+# Step 7：PeerTube 應用程式本身的 Secret
+# PEERTUBE_SECRET 是官方文件建議用 `openssl rand -hex 32` 產生的
+# session/cookie 簽章金鑰，這裡用教學用固定字串代替。
+# 管理員帳號：PeerTube 的第一個帳號名稱是寫死的 "root"
+# （installer.js: const username = 'root';），沒有任何環境變數可以
+# 改帳號名稱，所以這裡只放 email／密碼兩項可設定的值。
+# PEERTUBE_ADMIN_EMAIL／PT_INITIAL_ROOT_PASSWORD 都只有在資料庫
+# 「完全沒有任何使用者」（全新安裝）時才會被拿來建立 root 帳號，見
+# installer.js 的 createOAuthAdminIfNotExist()：一旦 DB 裡已經有
+# 使用者就會直接跳過，改這兩個值對已經初始化過的既有實例沒有作用，
+# 密碼要另外用 `npm run reset-password -- -u root` 才能改到現有帳號。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: peertube-secret
+  namespace: peertube
+type: Opaque
+stringData:
+  # session/cookie 簽章金鑰，正式環境要換成隨機值（見上方說明），
+  # 這裡固定字串只是方便教學重現。
+  PEERTUBE_SECRET: "TrainingOnlyPeertubeSecret_ChangeMeInProduction"
+  # 必須跟 02-postgres-secret.yaml 的 POSTGRES_PASSWORD 一致，
+  # 因為兩邊連的是同一個 PostgreSQL 帳號。
+  PEERTUBE_DB_PASSWORD: "TrainingPeertube123"
+  # 只有全新安裝（DB 裡完全沒有使用者）時才會拿來建立 root 帳號的
+  # email，見上方說明。
+  PEERTUBE_ADMIN_EMAIL: "admin@example.com"
+  # 同上，只在全新安裝時生效，是 root 帳號的初始密碼。
+  PT_INITIAL_ROOT_PASSWORD: "TrainingPeertubeRoot123"
+---
+# Step 8：PeerTube 影片與資料儲存
+# 用 RWO + rook-ceph-block：跟 filebrowser/flarum-assets 的 RWX 選擇
+# 不同，因為 PeerTube 這裡只跑 1 個 replica、沒有多 Pod 同時讀寫的
+# 需求，選 RWO 效能更好也更簡單——再次強調「RWO/RWX 看的是實際
+# 讀寫需求，不是看檔案種類」。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: peertube-storage
+  namespace: peertube
+spec:
+  # ReadWriteOnce：同時間只能給一個節點掛載讀寫，因為下面 09 的
+  # Deployment 只跑 1 個 replica，不需要多 Pod 同時讀寫同一份儲存。
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: rook-ceph-block
+  resources:
+    # 教學用容量，實際上 PeerTube 影片檔案很快就會超過這個大小，
+    # 正式環境要抓大很多。
+    requests:
+      storage: 10Gi
+---
+# Step 9：部署 PeerTube 本體
+# 教學重點：
+#   - PEERTUBE_TRUST_PROXY 明確列出叢集 Pod 網段會落入的
+#     'uniquelocal'（RFC1918 私有位址）：預設值只信任 'loopback'
+#     （127.0.0.1），但流量是從 dev-gateway 的 Pod 網路進來，不是
+#     從容器自己的 loopback，不調整的話 PeerTube 記錄到的用戶端 IP、
+#     以及判斷請求是否為 https 都會不準確。
+#   - PEERTUBE_WEBSERVER_HTTPS/PORT 填的是「使用者實際看到的網址」
+#     （https, 443），跟 Service/容器內部實際監聽的 9000 port 是兩回事
+#     ——Gateway 在邊界做 TLS 終止，Pod 內部收到的永遠是明文 HTTP，
+#     但 PeerTube 產生的影片網址/ActivityPub 聯邦資訊要用外部看到的
+#     網址，這兩者搞混是這類「後面有反向代理」架構常見的錯誤來源。
+#   - nodeSelector/toleration 排到 gpu01，同 postgres/redis。
+#   - securityContext 沒有 drop capabilities（實測踩到的坑，跟
+#     mysql/redis 同一種教訓）：這個 image 的 entrypoint 一樣是以
+#     root 啟動、再切換到內部的 peertube 使用者，drop 掉 capabilities
+#     會讓它連使用者切換都做不到（`failed switching to "peertube":
+#     operation not permitted`），容器直接啟動失敗。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: peertube
+  namespace: peertube
+  labels:
+    app: peertube
+spec:
+  # 只跑 1 個 replica：PeerTube 本體沒有為多實例橫向擴展設計
+  # （檔案儲存/工作佇列協調都假設單一實例），跟 postgres 一樣。
+  replicas: 1
+  # Recreate：先砍舊 Pod 再建新的。因為只有 1 個 replica，若用
+  # RollingUpdate 想維持不中斷還要多開一個 Pod，但這裡的儲存是
+  # ReadWriteOnce PVC，同時間本來就只能被一個 Pod 掛載，新舊 Pod
+  # 無法並存，只能接受更新時短暫中斷。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: peertube
+  template:
+    metadata:
+      labels:
+        app: peertube
+    spec:
+      # 跟 postgres/redis 排到同一台 gpu01，理由同前。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # 關掉 K8s 預設會把同 namespace 每個 Service 的資訊自動注入成
+      # <SVCNAME>_SERVICE_HOST/PORT 等環境變數的行為，避免這些自動
+      # 注入的變數跟下面手動設定的 PEERTUBE_DB_PORT/PEERTUBE_REDIS_PORT
+      # 等環境變數撞名、造成難以排查的設定錯誤。
+      enableServiceLinks: false
+      containers:
+        - name: peertube
+          image: chocobozzz/peertube:production-bookworm
+          # IfNotPresent：節點上已有這個 image 就直接用，不重新拉取。
+          imagePullPolicy: IfNotPresent
+          env:
+            # 以下四個 PEERTUBE_WEBSERVER_*/TRUST_PROXY 描述的是「使用者
+            # 從外部瀏覽器看到的樣子」，跟下面 containerPort: 9000（容器
+            # 實際監聽的 port）是完全不同的兩件事——這正是「後面有反向
+            # 代理」架構下最容易搞混的地方。
+            - name: PEERTUBE_WEBSERVER_HOSTNAME
+              value: "peertube.nexai.org.com"
+            # 外部使用者看到的 port（443，https 預設 port），不是容器
+            # 內部監聽的 9000；PeerTube 產生影片網址/ActivityPub 聯邦
+            # 資訊時會用這個值，填錯會讓對外連結全部指向錯誤的 port。
+            - name: PEERTUBE_WEBSERVER_PORT
+              value: "443"
+            # 告訴 PeerTube「外部一律是 https 進來的」，即使容器內部
+            # 收到的其實是 dev-gateway 終止 TLS 後轉來的明文 HTTP。
+            - name: PEERTUBE_WEBSERVER_HTTPS
+              value: "true"
+            # 預設只信任 loopback（127.0.0.1）送來的 X-Forwarded-* 標頭；
+            # 這裡流量是從 dev-gateway 的 Pod 網路（RFC1918 私有網段）
+            # 進來，要多加 uniquelocal，PeerTube 才會正確採信反向代理
+            # 附上的來源 IP／協定資訊，否則記錄到的用戶端 IP 跟
+            # https 判斷都會不準確。
+            - name: PEERTUBE_TRUST_PROXY
+              value: '["loopback","linklocal","uniquelocal"]'
+            - name: PEERTUBE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: peertube-secret
+                  key: PEERTUBE_SECRET
+            # 以下 DB_* 對應 05-postgres-statefulset.yaml / 04 的
+            # Service 名稱、以及 02-postgres-secret.yaml 的帳密設定。
+            - name: PEERTUBE_DB_HOSTNAME
+              value: "postgres"
+            - name: PEERTUBE_DB_PORT
+              value: "5432"
+            - name: PEERTUBE_DB_NAME
+              value: "peertube"
+            - name: PEERTUBE_DB_USERNAME
+              value: "peertube"
+            - name: PEERTUBE_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: peertube-secret
+                  key: PEERTUBE_DB_PASSWORD
+            # 對應 06-redis.yaml 的 Service 名稱／port，PeerTube 拿
+            # redis 當背景工作佇列與快取用。
+            - name: PEERTUBE_REDIS_HOSTNAME
+              value: "redis"
+            - name: PEERTUBE_REDIS_PORT
+              value: "6379"
+            - name: PEERTUBE_ADMIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: peertube-secret
+                  key: PEERTUBE_ADMIN_EMAIL
+            # 關掉一般使用者自行註冊，教學環境只給預先建立好的 root
+            # 帳號使用，避免學員互相誤用到別人的帳號。
+            - name: PEERTUBE_SIGNUP_ENABLED
+              value: "false"
+            - name: PT_INITIAL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: peertube-secret
+                  key: PT_INITIAL_ROOT_PASSWORD
+          ports:
+            # 容器實際監聽的 port，跟上面 PEERTUBE_WEBSERVER_PORT（443）
+            # 是兩回事——Service/probe 這裡用的都是這個內部 9000。
+            - name: http
+              containerPort: 9000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          # readinessProbe：initialDelaySeconds/failureThreshold 都抓得
+          #比一般無狀態應用寬（45 秒起跳、可以連續失敗 8 次），因為
+          # PeerTube 第一次啟動要跑資料庫 migration，時間比較長。
+          readinessProbe:
+            httpGet:
+              path: /api/v1/config
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          # livenessProbe：initialDelaySeconds 拉到 90 秒，避免第一次
+          # 啟動 migration 還沒跑完就被判定「沒活著」而重啟，
+          # 跟 flarum 的 mysql StatefulSet 是同一種教訓。
+          livenessProbe:
+            httpGet:
+              path: /api/v1/config
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            # 注意：這裡沒有 drop capabilities（見上方教學重點的實測
+            # 說明）——這個 image 的 entrypoint 一樣是以 root 啟動、
+            # 再切換到內部的 peertube 使用者，drop 掉 capabilities 會讓
+            # 使用者切換失敗、容器啟動不了。
+          volumeMounts:
+            # 掛進官方 image 的預設儲存路徑，對應 08-peertube-pvc.yaml。
+            - name: storage
+              mountPath: /app/storage
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 讓非 root 使用者也能讀寫這顆 PVC。
+        fsGroup: 999
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: peertube-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: peertube
+  namespace: peertube
+  labels:
+    app: peertube
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: peertube
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；對應 09 裡容器實際監聽的 9000
+      # （用名稱 http 引用，不用寫死數字）。
+      targetPort: http
+---
+# 前置條件：先套用 ../../shared-infra/00-dev-gateway.yaml
+# 注意：只掛 https 監聽器——PEERTUBE_WEBSERVER_HTTPS=true 已經告訴
+# PeerTube「外部一律用 https 存取」，如果學員改用 http 開，
+# PeerTube 產生的網址/資源連結會跟實際協定對不上。
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: peertube
+  namespace: peertube
+spec:
+  # 這個 HTTPRoute 要掛到哪個 Gateway 的哪個 listener 上；只掛 https
+  # 見上方說明，這裡不像 drawio 同時掛 http/https 兩個 sectionName。
+  parentRefs:
+    - name: dev-gateway
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手。
+  hostnames:
+    - "peertube.nexai.org.com"
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 10-peertube-service.yaml）。
+        - name: peertube
+          port: 80
+---
+# Step 12（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 同 planka 的做法：同一個 namespace 內部用 podSelector 做服務隔離，
+# 只是這裡多了 redis 這一路。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: peertube
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」
+  # （peertube/postgres/redis 都算）。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-peertube-from-gateway
+  namespace: peertube
+spec:
+  # 只對帶 app: peertube 這個 label 的 Pod 生效（應用程式本身，
+  # 不含 postgres/redis）。
+  podSelector:
+    matchLabels:
+      app: peertube
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 9000（容器實際監聽的 port），並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-postgres-from-peertube
+  namespace: peertube
+spec:
+  # 只對帶 app: postgres 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # 這裡示範「同一個 namespace 內部的服務隔離」：來源不是
+    # namespaceSelector（整個 namespace），而是 podSelector——只有貼
+    # app: peertube 的 Pod 才能連進來，就算跟 postgres 同一個
+    # namespace，redis Pod 一樣連不到。
+    - from:
+        - podSelector:
+            matchLabels:
+              app: peertube
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-postgres-from-cloudbeaver
+  namespace: peertube
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # 這筆補洞是給 cloudbeaver 產品用的（另一個 namespace 的資料庫
+    # 管理工具），讓上課時可以直接連進 postgres 檢視資料表；用
+    # namespaceSelector 鎖定整個 cloudbeaver namespace，而不是像上一筆
+    # 用 podSelector 鎖定同 namespace 內的特定 Pod。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudbeaver
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-redis-from-peertube
+  namespace: peertube
+spec:
+  # 只對帶 app: redis 這個 label 的 Pod 生效，同樣是「同 namespace
+  # 內部再細分」的示範——這是本檔案跟 drawio/planka 的 NetworkPolicy
+  # 相比多出來的第三路（redis）。
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: peertube
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: peertube
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-peertube-to-backends
+  namespace: peertube
+spec:
+  # 只對帶 app: peertube 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: peertube
+  policyTypes:
+    - Egress
+  egress:
+    # 對應 allow-ingress-to-postgres-from-peertube：Ingress/Egress 是
+    # 分開管制的兩個方向，postgres 那邊放行「誰能連進來」不代表
+    # peertube 這邊自動被允許「連出去」，兩份 policy 要成對存在，
+    # PEERTUBE_DB_HOSTNAME 的連線才走得通。
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # 對應 allow-ingress-to-redis-from-peertube，同一個道理，
+    # PEERTUBE_REDIS_HOSTNAME 的連線也要這筆 egress 才走得通。
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379

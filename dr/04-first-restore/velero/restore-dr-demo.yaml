@@ -1,0 +1,21 @@
+# =============================================================================
+# 04-first-restore / velero/restore-dr-demo.yaml
+# 情境：dr-demo 整個被刪掉了（./script/app-disaster.sh），原地救回來。
+# 等價 CLI：
+#   velero restore create dr-demo-restore-01 --from-backup dr-demo-backup-01 --wait
+# =============================================================================
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: dr-demo-restore-01            # 還原任務名稱（跟備份名稱無關，可以自己取）
+  namespace: velero                   # Restore CR 一律建在 Velero 所在的 namespace
+spec:
+  backupName: dr-demo-backup-01       # 從哪一份備份還原（必須是 Completed 的備份）
+  includedNamespaces:
+    - dr-demo                         # 只還原這個 namespace；不寫 = 備份裡的全部
+  restorePVs: true                    # 還原 PV 資料（Data Mover 從 S3 下載回新的 PV）
+                                      # false = 只建立 PVC 物件，不還原資料 → 會拿到空磁碟
+  existingResourcePolicy: none        # 目標已有同名資源時：none=跳過（預設，記 warning）
+                                      #                   update=嘗試用備份內容覆蓋
+  # excludedResources 不寫時，Velero 預設就會排除 nodes、events、backups/restores 等
+  itemOperationTimeout: 4h0m0s        # 等 Data Mover 下載完成的上限

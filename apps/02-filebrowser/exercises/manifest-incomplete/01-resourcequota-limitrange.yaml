@@ -1,0 +1,54 @@
+# Step 2：資源配額與預設值
+# 教學重點：跟 draw.io 的 quota 多一項 —— 這裡多限制了 requests.storage
+# 與 persistentvolumeclaims 數量，因為 filebrowser 這個產品開始會用到 PVC，
+# 企業場景常見「一個團隊最多能申請多少 PVC / 多少總儲存空間」的配額管控。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: filebrowser-quota
+  namespace: filebrowser
+spec:
+  hard:
+    # requests.* 是整個 namespace 承諾要保留給它的資源總和上限，
+    # 排程器用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "500m"
+    requests.memory: 512Mi
+    # limits.* 是整個 namespace 所有容器最多能吃到的資源總和上限，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "1"
+    limits.memory: 1Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod。
+    pods: "5"
+    # 這個 namespace 最多能建立幾個 PVC——filebrowser 固定用兩顆
+    # （檔案本體 + sqlite 資料庫），這裡設 4 留一點餘裕給示範/除錯用。
+    persistentvolumeclaims: "4"
+    # 這個 namespace 所有 PVC 的 requests.storage 加總上限，
+    # 對照下面 02-pvc.yaml 兩顆 PVC 共 11Gi，還留有空間可調大。
+    requests.storage: __FILL_ME_3__
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: filebrowser-limitrange
+  namespace: filebrowser
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 200m
+        memory: 256Mi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）。
+      max:
+        cpu: 500m
+        memory: __FILL_ME_4__
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 25m
+        memory: 32Mi

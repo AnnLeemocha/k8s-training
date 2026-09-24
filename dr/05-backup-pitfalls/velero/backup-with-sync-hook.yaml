@@ -1,0 +1,40 @@
+# =============================================================================
+# 05-backup-pitfalls / velero/backup-with-sync-hook.yaml
+# 「快照前先把記憶體裡的資料寫進磁碟」—— Velero Backup Hook 範例。
+#
+# 背景（本單元實測踩到的真實坑）：CSI Snapshot 拍的是「區塊裝置」當下的樣子，
+# 應用程式剛寫的資料可能還在節點的 page cache（Linux 預設最久約 30 秒才寫回），
+# 快照拍到的就是「檔案存在但內容是空的」。資料庫（PostgreSQL/MySQL）每次 commit
+# 都會 fsync，所以通常不受影響；一般應用程式寫檔則不一定。
+#
+# 解法：在拍快照之前，進到 Pod 裡執行 `sync`（更嚴謹可用 fsfreeze，或資料庫自己的
+# checkpoint / flush 指令）。等同於 `velero backup create` 加上 hook，
+# 但 CLI 沒有提供 hook 參數，所以用 Backup CR 的 yaml 直接 apply。
+# =============================================================================
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: pitfall-with-hook             # Backup 名稱；同名已存在時 apply 不會重跑，需換名字
+  namespace: velero                   # Backup CR 一律建立在 Velero 所在的 namespace
+spec:
+  includedNamespaces:
+    - dr-pitfall                      # 只備份這個 namespace
+  snapshotVolumes: true               # 對 PVC 做 CSI Snapshot
+  snapshotMoveData: true              # 再用 Data Mover 把快照內容搬到 Object Storage（叢集外）
+  storageLocation: default            # 寫到哪個 BackupStorageLocation
+  ttl: 720h0m0s                       # 30 天後自動過期刪除
+  hooks:
+    resources:
+      - name: flush-page-cache        # hook 名稱，只是標記用
+        includedNamespaces:
+          - dr-pitfall
+        labelSelector:                # 只對符合 label 的 Pod 執行
+          matchExpressions:
+            - key: app
+              operator: In
+              values: ["postgres", "legacy-writer"]
+        pre:                          # pre = 備份這個 Pod（含它的 Volume 快照）之前執行
+          - exec:
+              command: ["/bin/sh", "-c", "sync && echo synced"]   # 把 dirty page 全部寫回磁碟
+              onError: Fail           # hook 失敗就讓這個 Pod 的備份失敗（Continue 則只記錄）
+              timeout: 30s            # 最多等 30 秒

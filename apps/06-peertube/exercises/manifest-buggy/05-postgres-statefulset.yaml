@@ -1,0 +1,129 @@
+# Step 5：PostgreSQL StatefulSet
+# 教學重點：
+#   - nodeSelector/toleration 排到 gpu01：延續 onlyoffice 的做法。
+#     這座叢集 k8s01~03 記憶體已經很緊繃，PeerTube 這組（postgres +
+#     redis + app 三個 Pod）乾脆整組都排到記憶體較寬裕的 gpu01，
+#     避免又把其他共用工作負載擠爆。
+#   - 沿用 mysql/planka 學到的教訓：不 drop capabilities、PGDATA
+#     指到子目錄避開 lost+found 問題。
+#   - initdb ConfigMap：見 03-postgres-initdb-configmap.yaml。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: peertube
+spec:
+  # 要跟哪個 Headless Service（04-postgres-service.yaml）搭配，
+  # 決定 Pod 的 DNS 名稱格式（postgres-0.postgres.peertube...）。
+  serviceName: postgres
+  # 一般 PostgreSQL 沒有內建多主複寫，多開幾個 replicas並不會變成
+  # 一個資料庫叢集，只會變成好幾個各自獨立、資料不同步的 PostgreSQL，
+  # 所以固定只開 1。
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # 見上方教學重點：整組（postgres/redis/peertube）都刻意排到
+      # 記憶體較寬裕的 gpu01，避免擠爆其他共用工作負載。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      # gpu01 平常帶有 NoSchedule taint（保留給 GPU 工作負載），這裡要
+      # 明確容忍這個 taint，Pod 才排得上去。
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine
+          # 把 02-postgres-secret.yaml 的 POSTGRES_USER/PASSWORD/DB
+          # 三個 key 整包注入成環境變數，官方 image 靠這幾個變數名稱
+          # 完成初始化。
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            # 把資料目錄指到 data 這顆 PVC 底下的子目錄 pgdata，而不是
+            # 直接用掛載點根目錄——避開 Kubernetes 幫某些儲存後端自動
+            # 建立的 lost+found 目錄讓 initdb 誤判「目錄非空」而失敗
+            # 的問題（跟 mysql/planka 踩過的坑同一類）。
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            # 純宣告用途，方便用名稱 postgres 被下面的 probe/Service 引用。
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # readinessProbe：用 postgres 官方內建的 pg_isready 工具檢查
+          # 資料庫是否已經能接受連線，失敗只會把 Pod 從 Service
+          # Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # livenessProbe：只做最簡單的 TCP 連線測試（不像 readiness 會
+          # 真的問資料庫狀態），失敗會直接重啟容器，數值抓得比較保守，
+          # 避免資料庫還在跑 initdb ConfigMap 那段 SQL 時就被砍掉。
+          livenessProbe:
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            # 注意：這裡沒有 drop capabilities——官方 postgres image 的
+            # entrypoint 以 root 啟動後，需要用 capabilities 把檔案/目錄
+            # 權限改成內部的 postgres 使用者才能啟動，跟 mysql/flarum
+            # 是同一類「資料庫官方 image 不能亂套用同一套 hardening」
+            # 的實務案例。
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # 掛進 /docker-entrypoint-initdb.d/，官方 image 的 entrypoint
+            # 會在「資料目錄第一次初始化」時自動執行這裡面的 .sql/.sh，
+            # 對應 03-postgres-initdb-configmap.yaml。
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d/extensions
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 999 是 postgres 官方 image 內建的 postgres 使用者 gid，
+        # 讓非 root 使用者也能讀寫資料目錄。
+        fsGroup: 999
+      volumes:
+        - name: initdb
+          configMap:
+            name: postgres-initdb
+  # StatefulSet 專屬欄位：每個 Pod（postgres-0）各自拿到專屬的 PVC，
+  # 並且 Pod 重建後會重新綁定「同一顆」PVC，這是跟 Deployment
+  # 最大的不同（對照 06-redis.yaml 的 emptyDir 用法）。
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: rook-ceph-block
+        resources:
+          requests:
+            storage: 5Gi

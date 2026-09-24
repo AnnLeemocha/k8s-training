@@ -1,0 +1,88 @@
+# Step 4：FileBrowser Quantum 的設定檔
+# 教學重點：舊版 filebrowser/filebrowser 只靠 FB_ROOT / FB_DATABASE 兩個
+# 環境變數就能決定行為；FileBrowser Quantum 改成一份宣告式的 config.yaml，
+# 功能變多了（登入方式、每個來源的規則、OnlyOffice 整合…），設定也跟著
+# 變成一份結構完整的檔案——這是換代最直接能感受到的差異，可以藉此帶到
+# 「功能與設定複雜度的取捨」。
+#
+# 這裡只填有教學意義、非填不可的欄位，其餘沿用官方預設值：
+#   - server.sources：檔案來源，對應 02-pvc.yaml 的 filebrowser-srv（掛在 /srv）。
+#   - server.database / server.cacheDir：都指到 filebrowser-db（掛在
+#     /home/filebrowser/data），跟 02-pvc.yaml 的註解一致——sqlite 設定資料庫
+#     不能被多個行程同時寫入，這點跟舊版一樣沒變。
+#   - server.internalUrl：**實測踩到的坑**——如果不填這個欄位，
+#     filebrowser 會拿使用者瀏覽器連進來的網址（`filebrowser.nexai.org.com`）
+#     組出下載連結，叫 Document Server 回頭去抓檔案內容／回報存檔結果。
+#     但 onlyoffice pod 連不到叢集外部的 dev-gateway 網域（NetworkPolicy
+#     也沒開放），實測會直接在編輯器畫面顯示「目前無法存取該檔案」。
+#     填了這個欄位後，filebrowser 會改用叢集內部 Service DNS 組網址，
+#     onlyoffice pod 才連得到——對應地，onlyoffice 那邊的 NetworkPolicy
+#     也要新增一條 egress 規則放行連到 filebrowser namespace，見
+#     ../../onlyoffice/manifest/07-networkpolicy.yaml。
+#   - integrations.office：串接 onlyoffice namespace 的 Document Server。
+#     `secret` 必須跟 ../../onlyoffice/manifest/02-secret.yaml 的
+#     JWT_SECRET **逐字一致**，否則雙方簽章對不上、編輯器打不開。
+#     `url` 是使用者瀏覽器要載入的位址（走 dev-gateway 對外網域）；
+#     `internalUrl` 是 filebrowser 後端自己呼叫 Document Server 用的
+#     叢集內部 Service DNS，兩者服務對象不同、不能混用。
+#   - server.disableUpdateCheck：**實測踩到的坑，跟 onlyoffice 那邊
+#     PLUGINS_ENABLED 是同一類問題**——Quantum 預設啟動時會「同步、
+#     阻塞式」呼叫 `https://api.github.com/repos/.../tags` 檢查有沒有
+#     新版本，這座叢集的 NetworkPolicy 沒開放對外網際網路，連線會被
+#     悄悄丟棄，實測每次啟動都卡在這裡整整 31 秒（TCP connect timeout）
+#     才繼續往下執行，而不是啟動失敗。關掉這個檢查後，開機時間從
+#     ~31 秒降到 2~3 秒，readiness/liveness probe 才不會在它卡住連線的
+#     時候把 Pod 誤判成壞掉而不斷重啟。零信任網路下「預設會打外網的
+#     背景工作要嘛開白名單、要嘛乾脆關掉」，這是第二個活教材。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebrowser-config
+  namespace: filebrowser
+data:
+  config.yaml: |
+    server:
+      # 容器內部監聽的 port，要跟下面 04-deployment.yaml 的
+      # containerPort/readinessProbe 一致。
+      port: 80
+      # 網站掛在網域的哪個路徑下；"/" 代表直接掛根路徑，不用子路徑。
+      baseURL: "/"
+      disableUpdateCheck: true
+      internalUrl: "http://filebrowser.filebrowser.svc.cluster.local"
+      database: "/home/filebrowser/data/filebrowser.db"
+      cacheDir: "/home/filebrowser/data/cache"
+      sources:
+        - path: "/srv"
+          # 這個來源在 UI 上顯示的名稱，跟下面 API 呼叫的
+          # `?source=files` 對應（見 ../README.md 的驗證指令）。
+          name: "files"
+          config:
+            # 使用者登入後預設就能看到這個來源，不用手動啟用。
+            defaultEnabled: true
+    auth:
+      # 預設管理員帳密，僅供教學示範使用，上課示範完務必請學員修改
+      # （見 ../README.md「上課前請先確認 / 調整」）。
+      adminUsername: "admin"
+      adminPassword: "admin"
+      methods:
+        password:
+          enabled: true
+          # 密碼最短長度，教學用途調低方便示範，正式環境應提高。
+          minLength: 5
+    userDefaults:
+      account:
+        # 新使用者預設帳號權限：能修改（改名/刪除/上傳覆蓋）與下載檔案，
+        # 但不包含建立/管理其他使用者等管理員權限。
+        permissions:
+          modify: true
+          download: true
+    integrations:
+      office:
+        # 使用者瀏覽器要載入 Document Server 編輯畫面用的網址，
+        # 走 dev-gateway 對外網域（跟 internalUrl 服務對象不同，見上方
+        # 檔頭教學重點，不能混用）。
+        url: "http://onlyoffice.nexai.org.com"
+        internalUrl: "http://onlyoffice.onlyoffice.svc.cluster.local"
+        # 必須跟 ../../onlyoffice/manifest/02-secret.yaml 的
+        # JWT_SECRET 逐字一致，否則雙方簽章對不上、編輯器打不開。
+        secret: "TrainingOnlyofficeJwtSecret_ChangeMe"

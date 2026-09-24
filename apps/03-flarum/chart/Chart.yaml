@@ -1,0 +1,6 @@
+apiVersion: v2
+name: flarum
+description: Flarum — K8s 教育訓練用 Helm Chart（併入 mysql StatefulSet / initContainer / enableServiceLinks 陷阱示範）
+type: application
+version: 0.2.0
+appVersion: "latest"

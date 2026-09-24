@@ -1,0 +1,75 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "filebrowser.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "filebrowser.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: filebrowser
+  policyTypes:
+    - Ingress
+  ingress:
+    - from: []
+      ports:
+        - protocol: TCP
+          port: {{ .Values.containerPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "filebrowser.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-filebrowser-to-onlyoffice
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "filebrowser.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: filebrowser
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.onlyoffice.namespace }}
+      ports:
+        - protocol: TCP
+          port: 80
+{{- end }}

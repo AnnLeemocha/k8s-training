@@ -1,0 +1,77 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudbeaver.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-cloudbeaver-from-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudbeaver.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: cloudbeaver
+  policyTypes:
+    - Ingress
+  ingress:
+    - from: []
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.containerPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudbeaver.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-cloudbeaver-to-databases
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudbeaver.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: cloudbeaver
+  policyTypes:
+    - Egress
+  egress:
+    {{- range .Values.networkPolicy.databaseTargets }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .port }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,168 @@
+# flarum Helm Chart 預設值
+# 注意：namespace 不由這個 chart 建立，請先手動建立或套用
+# ../manifest/00-namespace.yaml，再用
+# `helm install flarum ./chart -n flarum` 安裝。
+#
+# mysql 併在這個 chart 裡（比照 planka 把 postgres 併進自己 chart 的做法，
+# 見 mysql.* 區塊），不再是獨立的 mysql chart。
+#
+# 下面每個欄位都標註「哪個 template 會用到」。這個產品是全教材第一個
+# StatefulSet + initContainer + 兩個 Secret 互相引用的範例。
+
+# Flarum 容器使用的映像檔（templates/deployment.yaml）。官方沒有提供
+# Flarum image，這裡用社群維護的 mondedie/flarum。
+image:
+  repository: mondedie/flarum
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Flarum 連線 mysql 用的參數，寫進 templates/deployment.yaml 的環境變數
+# DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME。host 是同 namespace 內
+# mysql Service 的短名稱（不用 FQDN），因為 App 跟 DB 現在同住一個
+# namespace。密碼不在這裡設定，Deployment 直接用 secretKeyRef 讀
+# mysql-secret 的 MYSQL_PASSWORD（見下面 mysql.auth.password）——
+# 同 namespace 內的 Secret 可以互相被 Pod 引用，不用重複複製密碼。
+db:
+  host: "mysql"
+  port: "3306"
+  name: "appdb"
+  user: "appuser"
+
+# Flarum 論壇本身的設定，寫進 templates/deployment.yaml 的環境變數
+# FLARUM_URL/FLARUM_TITLE/FLARUM_ADMIN_USER/FLARUM_ADMIN_MAIL，以及
+# templates/secret.yaml 的 FLARUM_ADMIN_PASS（首次啟動安裝時建立的
+# 管理員帳密）。url 必須跟下面 hostnames[0] 對得上，否則 Flarum 產生的
+# 內部連結會是錯的網域。
+forum:
+  url: "http://flarum.nexai.org.com"
+  title: "K8s Training Forum"
+  adminUser: "admin"
+  adminMail: "admin@example.com"
+  adminPassword: "TrainingAdmin123!"   # 教學用明文，正式環境請改用外部密鑰管理
+
+# Flarum 容器的資源請求/上限（templates/deployment.yaml），必須落在
+# limitRange.min ~ limitRange.max 之間；跟下面 mysql.resources 加總後
+# 不能超過 resourceQuota（一個 namespace 現在同時跑 App + DB 兩個
+# workload）。
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+
+# Namespace 層級總量配額（templates/resourcequota.yaml）。這裡的數字要
+# 同時覆蓋 Flarum 跟 mysql 兩個 workload 的加總，比只跑單一產品的
+# namespace 抓得寬（mysql 合併時曾把 limitRange.max 從 500m/1Gi 往上調，
+# 就是因為 mysql 自己的 limits 就吃到 1 CPU/1Gi）。
+resourceQuota:
+  enabled: true
+  requestsCpu: "750m"
+  requestsMemory: 1Gi
+  limitsCpu: "2"
+  limitsMemory: 3Gi
+  pods: "5"
+  persistentVolumeClaims: "4"
+  requestsStorage: 20Gi
+
+# Namespace 層級單一容器的地板/天花板（templates/resourcequota.yaml 裡
+# 的 LimitRange）。max 必須 ≥ Flarum 跟 mysql 兩者的 resources.limits
+# 裡較大的那個，min 必須 ≤ 兩者 resources.requests 裡較小的那個。
+limitRange:
+  enabled: true
+  default:
+    cpu: 250m
+    memory: 512Mi
+  defaultRequest:
+    cpu: 100m
+    memory: 256Mi
+  max:
+    cpu: "1"
+    memory: 2Gi
+  min:
+    cpu: 50m
+    memory: 128Mi
+
+# Flarum 自己的兩個 PVC（templates/pvc.yaml），刻意只掛「兩個子路徑」，
+# 不是整個 /flarum/app，因為那個路徑上還有映像本身內建的應用程式碼，
+# 整包掛 PVC 會把程式碼蓋掉：
+# - storage：/flarum/app/storage（session、cache 等執行期資料），單寫，
+#   用 rook-ceph-block（RWO）。
+# - assets：/flarum/app/public/assets（使用者上傳、發布出去的靜態資源），
+#   可能被多 Pod 同時讀寫，用 rook-cephfs（RWX）。
+# initContainer（templates/deployment.yaml）會在 Pod 啟動時先把這兩個
+# 空 PVC 補上 Flarum 預期的子目錄結構。
+persistence:
+  storage:
+    storageClassName: rook-ceph-block
+    size: 2Gi
+  assets:
+    storageClassName: rook-cephfs
+    size: 5Gi
+
+# ClusterIP Service 對外曝露的 port（templates/service.yaml），轉給
+# containerPort——Flarum 容器實際監聽的 port（8888，不是 80，跟其他
+# 產品不同，是踩過 K8s 自動注入 FLARUM_PORT 環境變數跟 Flarum 自己的
+# FLARUM_PORT 設定衝突之後，靠 enableServiceLinks: false 解決的）。
+service:
+  port: 80
+  containerPort: 8888
+
+# HTTPRoute 掛的 Gateway（templates/httproute.yaml）。
+gateway:
+  name: dev-gateway
+  namespace: default
+  sectionNames:
+    - http
+    - https
+
+# HTTPRoute 比對 Host header 用的網域，必須跟上面 forum.url 一致。
+hostnames:
+  - flarum.nexai.org.com
+
+# NetworkPolicy（templates/networkpolicy.yaml）：same-namespace
+# podSelector 型範例，只允許 Flarum Pod 連到 mysql Pod 的 3306、
+# Gateway 連到 Flarum 的 containerPort，其餘一律擋掉。
+networkPolicy:
+  enabled: true
+
+# mysql StatefulSet，併在 flarum 這個 namespace/release 裡（單一消費者，
+# 比照 planka 把 postgres 併進自己 chart 的做法）。enabled: false 可以
+# 整個關掉這組資源（例如改成連外部既有的 mysql）。
+mysql:
+  enabled: true
+  # mysql 容器映像檔（templates/mysql.yaml）。官方 mysql image 的
+  # entrypoint 需要用 root 身分自降權（setuid/setgid），不能對它套用
+  # capabilities.drop: [ALL] 那種硬化設定。
+  image:
+    repository: mysql
+    tag: "8.0.40"
+    pullPolicy: IfNotPresent
+  # 寫進 templates/mysql.yaml 產生的 mysql-secret（MYSQL_ROOT_PASSWORD/
+  # MYSQL_DATABASE/MYSQL_USER/MYSQL_PASSWORD），Flarum 的 DB_PASS 直接
+  # secretKeyRef 讀這裡的 password，不重複填一份。
+  # 注意：這些密碼只有在 PVC 第一次初始化（initdb）時套用，PVC 已存在
+  # 後改這裡的值不會反映到實際的 mysql 帳密，要改密碼得先清空 PVC。
+  auth:
+    rootPassword: "TrainingRoot123!"
+    database: "appdb"
+    username: "appuser"
+    password: "TrainingApp123!"   # 教學用明文，正式環境請改用外部密鑰管理
+  # mysql 容器的資源請求/上限（templates/mysql.yaml），跟上面 Flarum
+  # 的 resources 一起算進 resourceQuota/limitRange。
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # mysql 資料目錄的 PVC（templates/mysql.yaml 的
+  # volumeClaimTemplates），單寫用 rook-ceph-block（RWO）。
+  # 教學提醒：mysql 首次 initdb 在本叢集實測約需 97 秒，StatefulSet 的
+  # livenessProbe.initialDelaySeconds 必須設得比這個時間長，太短會在
+  # initdb 過程中把容器殺掉，導致密碼設定「半完成」而永久鎖死。
+  persistence:
+    storageClassName: rook-ceph-block
+    size: 5Gi

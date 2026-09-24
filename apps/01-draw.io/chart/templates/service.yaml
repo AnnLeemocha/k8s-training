@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "drawio.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "drawio.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: drawio
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

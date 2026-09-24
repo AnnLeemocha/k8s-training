@@ -1,0 +1,194 @@
+# Step 7：部署 flarum 本體
+# 教學重點：
+#   - initContainer：這是本課程第一次出現 initContainer。
+#     flarum-storage / flarum-assets 這兩顆 PVC 一開始是空的，但 Flarum
+#     程式期待 storage/、public/assets/ 底下已經有特定子目錄結構
+#     （storage/logs、storage/cache、public/assets/avatars…），
+#     所以在主容器啟動前，先用一個 initContainer 把這些子目錄建好、
+#     並且 chown 成容器實際執行的 uid/gid（991:991），主程式才能正常寫入。
+#   - replicas 只開 1、strategy 用 Recreate：flarum-storage 是 RWO，
+#     同時間只能被一個 Pod 掛載，滾動更新（同時存在新舊兩個 Pod）會卡住；
+#     且 Flarum 沒有內建跨 Pod 共享 session/cache 的機制——如果之後這門課
+#     教到 Redis，可以回頭示範「加一個共用 cache/session 後端，
+#     才有辦法安全地水平擴展這種傳統 PHP 應用」。
+#   - securityContext 沒有 drop capabilities：跟 mysql 同樣的教訓——
+#     這個 image 的 entrypoint 會以 root 執行 chown 把 /flarum 目錄
+#     交給內部的 991:991 使用者，再 su-exec 降權執行，drop 掉
+#     CAP_CHOWN/CAP_SETUID/CAP_SETGID 會讓它啟動失敗。
+#   - DB_HOST 指到同 namespace 裡 mysql 的 headless service 短名
+#     （不需要完整 FQDN）；DB_PASS 直接用 secretKeyRef 讀 02-mysql-secret.yaml
+#     裡的 MYSQL_PASSWORD，同一個 namespace 內的不同 Secret 物件可以互相
+#     被 Pod 讀取組合，不需要像以前 mysql 是獨立產品時那樣手動複製一份
+#     密碼到 flarum 自己的 Secret。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flarum
+  namespace: flarum
+  labels:
+    app: flarum
+spec:
+  # 見上方教學重點：flarum-storage 是 RWO，只能同時給一個 Pod 掛載。
+  replicas: 1
+  strategy:
+    # Recreate：更新時先砍掉舊 Pod，等它完全終止、釋放掉 RWO 的 PVC，
+    # 才建立新 Pod（對照 RollingUpdate 會讓新舊 Pod 同時存在一小段時間，
+    # 這裡因為 PVC 是 RWO 所以不能那樣做，更新期間會有短暫服務中斷）。
+    type: Recreate
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: flarum
+  template:
+    metadata:
+      labels:
+        app: flarum
+    spec:
+      # enableServiceLinks: false（實測踩到的真坑）
+      # Kubernetes 預設會幫每個 Pod 依「目前 namespace 看得到的所有 Service」
+      # 自動注入一組 Docker-links 風格的環境變數，例如 Service 叫 flarum、
+      # port 叫 80，就會注入 FLARUM_PORT=tcp://<clusterIP>:80。
+      # 這個產品剛好自己也定義了一個叫 FLARUM_PORT 的環境變數（nginx 監聽埠），
+      # 兩者「撞名」，實測發現 K8s 自動注入的值會蓋掉 image 原本的
+      # FLARUM_PORT=8888，害 nginx 設定檔套用到錯誤的值直接啟動失敗。
+      # 這裡我們用的是 DNS-based 服務發現（DB_HOST 直接寫 FQDN），
+      # 完全不需要這組舊式 env-var 注入，直接關掉最乾淨。
+      enableServiceLinks: __FILL_ME_18__
+      initContainers:
+        - name: init-storage-dirs
+          # 用最小的 busybox 而不是 flarum 本尊的 image，只是為了跑幾行
+          # shell 建目錄/改權限，開機快、也不會意外把應用程式的 entrypoint
+          # 邏輯跑一次。
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /storage/formatter /storage/sessions /storage/logs /storage/tmp \
+                       /storage/cache /storage/less /storage/views /storage/locale
+              mkdir -p /assets/avatars
+              # 991:991 是主容器內 Flarum 程式實際執行的 uid/gid，這裡先
+              # 用 initContainer（此時還是 root）把兩顆空 PVC 的目錄結構
+              # 建好並改成該身分擁有，主容器降權後才寫得進去。
+              chown -R __FILL_ME_19__ /storage /assets
+          volumeMounts:
+            # 這裡掛載路徑是 /storage、/assets（不是主容器的
+            # /flarum/app/storage），因為 initContainer 只需要碰到這兩顆
+            # PVC 本身，不需要也沒有 image 烘進去的其他 Flarum 程式碼。
+            - name: storage
+              mountPath: /storage
+            - name: assets
+              mountPath: /assets
+      containers:
+        - name: flarum
+          image: mondedie/flarum:latest
+          # IfNotPresent：節點上已有這個 image 就直接用，不重新拉取；
+          # 這裡用的是 :latest tag，示範時若要確保拿到最新版本，
+          # 需手動改成 Always 或換成明確版本號 tag。
+          imagePullPolicy: IfNotPresent
+          env:
+            # 以下 DB_* 是 mondedie/flarum image 認得的環境變數，容器
+            # entrypoint 會拿這些值去產生 Flarum 的資料庫連線設定。
+            - name: DB_HOST
+              # 同 namespace 內用短名即可連到 03-mysql-service.yaml
+              # 這個 Headless Service，不需要完整 FQDN。
+              value: __FILL_ME_20__
+            - name: DB_PORT
+              value: "3306"
+            # 這三個值要跟 02-mysql-secret.yaml 裡 mysql 初始化時建立的
+            # 資料庫/帳號完全對應，任何一個對不上都會連線失敗。
+            - name: DB_NAME
+              value: "appdb"
+            - name: DB_USER
+              value: "appuser"
+            - name: DB_PASS
+              # 直接讀 02-mysql-secret.yaml 的 MYSQL_PASSWORD key
+              # （key 名稱不同，值相同），同 namespace 內的 Secret
+              # 可以互相被不同的 Pod 讀取組合。
+              valueFrom:
+                secretKeyRef:
+                  name: __FILL_ME_21__
+                  key: MYSQL_PASSWORD
+            # 資料表前綴，留空代表不加前綴（單一應用獨佔這顆資料庫，
+            # 不需要靠前綴區分多個應用共用同一顆 DB 的資料表）。
+            - name: DB_PREF
+              value: ""
+            # Flarum 產生連結、靜態資源網址時使用的對外網址，必須跟
+            # 09-httproute.yaml 的 hostnames 一致，否則頁面資源會 404。
+            - name: FORUM_URL
+              value: "http://flarum.nexai.org.com"
+            - name: FLARUM_TITLE
+              value: "K8s Training Forum"
+            # 以下三個 ADMIN_* 只在第一次安裝（資料庫是全新的）時生效，
+            # 用來建立初始管理員帳號；之後修改這裡不會回頭改掉已存在的帳號。
+            - name: FLARUM_ADMIN_USER
+              value: "admin"
+            - name: FLARUM_ADMIN_MAIL
+              value: "admin@example.com"
+            - name: FLARUM_ADMIN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: __FILL_ME_22__
+                  key: FLARUM_ADMIN_PASS
+            # 要求應用程式把 log 寫到容器的 stdout/stderr，才能用
+            # `kubectl logs` 直接看到，不用另外進容器看檔案。
+            - name: LOG_TO_STDOUT
+              value: "true"
+          ports:
+            # 純宣告用途，方便用名稱 http 被下面 probe/Service 引用。
+            - name: http
+              # image 內建 nginx 實際監聽的埠（由 FLARUM_PORT 環境變數
+              # 控制，這裡沿用 image 預設值，沒有另外宣告該變數）。
+              containerPort: 8888
+              protocol: TCP
+          resources:
+            # requests：排程器保證一定拿得到的資源量。
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            # limits：實際執行時的封頂值，超過 memory 會被 OOMKilled。
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          # readinessProbe：探測「現在能不能收流量」，失敗只會把 Pod
+          # 從 Service 的 Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            # PHP 應用 + 要等資料庫連得上，開機比純靜態服務慢，先給 30 秒。
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # 容忍到 6 次失敗才轉 NotReady，避免資料庫初次建置較久時
+            # 被誤判成「還沒準備好」而抖動。
+            failureThreshold: 6
+          # livenessProbe：失敗會直接重啟容器，數值要比 readinessProbe
+          # 更保守，initialDelaySeconds 特地拉到 60 避免安裝過程被誤殺。
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: __FILL_ME_23__
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            # 只掛「資料類」子目錄，不是整個 /flarum/app——理由見檔案
+            # 最上面的教學重點（image 把程式碼烘進 /flarum/app，整包掛
+            # PVC 上去會蓋掉程式碼）。
+            - name: storage
+              mountPath: __FILL_ME_24__
+            - name: assets
+              mountPath: __FILL_ME_25__
+      securityContext:
+        # Pod 層級：掛進來的 Volume 會被強制改成這個 group 擁有
+        # （991 是 image 內部實際執行 Flarum 的使用者 gid）。
+        fsGroup: 991
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: flarum-storage
+        - name: assets
+          persistentVolumeClaim:
+            claimName: flarum-assets

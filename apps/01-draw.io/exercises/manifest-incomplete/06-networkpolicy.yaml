@@ -1,0 +1,64 @@
+# Step 7（進階、選用）：NetworkPolicy 零信任網路示範
+# 教學重點：預設 K8s 網路是「全通」，企業場景通常要求最小權限：
+#   1) 先 default-deny 所有 ingress / egress
+#   2) 只開放必要的路徑（DNS 查詢、Gateway 進來的流量、同 namespace 內部溝通）
+#
+# !!! 上課前請務必先實測 !!!
+# 這座叢集用 Cilium 實作 Gateway API，Gateway 送進 Pod 的流量在 NetworkPolicy
+# 眼中仍視為「叢集內流量」，理論上會被下面的 allow-ingress-from-gateway 放行；
+# 但實際行為會因 Cilium 版本/設定而略有差異，建議正式上課前先驗證
+# `kubectl apply` 後 HTTPRoute 是否仍可正常連線，避免當場示範失敗。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: drawio
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面兩份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-gateway
+  namespace: drawio
+spec:
+  # 只對帶 app: drawio 這個 label 的 Pod 生效（這裡就是應用程式本身）。
+  podSelector:
+    matchLabels:
+      app: __FILL_ME_19__
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 8080 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: __FILL_ME_20__
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: drawio
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

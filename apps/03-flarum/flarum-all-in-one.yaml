@@ -1,0 +1,767 @@
+# flarum — 完整合併版 manifest（單檔一次套用）
+#
+# 教學拆解版在 manifest/ 目錄（00~10 依序 apply，適合逐步講解）；
+# 這份是給「已經教完拆解版、要快速重建環境」或「demo 用」的合併版，
+# 內容與 manifest/ 目錄逐檔內容完全一致。
+#
+# mysql 併在這個產品裡（02~04 號檔案，見 00-namespace.yaml 的說明），
+# 不再是獨立的 mysql 產品，所以只需要：
+#   1) 先套用共用的 ../shared-infra/00-dev-gateway.yaml
+#
+# 用法：
+#   kubectl apply -f flarum-all-in-one.yaml
+# 清除：
+#   kubectl delete namespace flarum
+
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：mysql 併在這個產品裡（見 02~04 號檔案），而不是像最早的設計
+# 那樣獨立成一個共用的 mysql 產品——因為實際盤點下來，mysql 從頭到尾只有
+# flarum 一個消費者，比照 planka 把 postgres 併進自己 namespace 的做法，
+# 「單一消費者的資料庫」直接跟著應用一起放，不需要額外一層跨 namespace
+# 的零信任 NetworkPolicy。因此這裡不再需要 `training/mysql-client=true`
+# 這種「跨 namespace 白名單」標籤。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flarum
+  labels:
+    # 純標記用途，方便用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: flarum
+---
+# Step 2：資源配額與預設值
+# 教學重點：這份配額同時要容納 flarum 應用程式本身，以及併進來的 mysql
+# StatefulSet（見 02~04 號檔案）——數字是兩邊原本各自配額的合併/調整版，
+# LimitRange 的 max 尤其要注意：mysql 官方 image 建議的 limit（cpu 1 顆、
+# 記憶體 1Gi）比原本 flarum 單獨用的上限（cpu 500m）還高，沒調高 max
+# 的話，mysql 的 Pod 會直接被 API server 擋掉建立不了。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: flarum-quota
+  namespace: flarum
+spec:
+  hard:
+    # requests.* 是整個 namespace 承諾要保留給它的資源總和上限——
+    # 排程器用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "750m"
+    requests.memory: 1Gi
+    # limits.* 是整個 namespace 所有容器最多能吃到的資源總和上限，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "2"
+    limits.memory: 3Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod（flarum + mysql 兩個工作負載）。
+    pods: "5"
+    # 限制這個 namespace 最多能建立幾顆 PVC——這裡有 flarum-storage、
+    # flarum-assets、mysql 的 volumeClaimTemplates 共 3 顆在用，留一點餘裕。
+    persistentvolumeclaims: "4"
+    # 所有 PVC 的 storage request 加總上限，避免忘記調整就把底層
+    # rook-ceph 存儲池吃光。
+    requests.storage: 20Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: flarum-limitrange
+  namespace: flarum
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 250m
+        memory: 512Mi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      # max：單一容器允許申請的資源上限。這裡刻意調到 cpu 1 顆、2Gi，
+      # 就是為了讓下面 04 號檔案 mysql StatefulSet 的 limits（cpu 1、
+      # memory 1Gi）能通過驗證——沒調高的話 mysql Pod 會直接被
+      # API server 拒絕建立。
+      max:
+        cpu: "1"
+        memory: 2Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 50m
+        memory: 128Mi
+---
+# Step 3：mysql 的 Secret
+# 教學重點：mysql 原本是獨立產品時，這份密碼會被 flarum 另外「複製」一份
+# 到自己的 Secret 裡（Secret 是 namespace-scoped 資源，不能跨 namespace
+# 引用）。併進同一個 namespace 之後，這個限制不存在了——07 號檔案的
+# flarum Deployment 會直接用 secretKeyRef 讀這個 Secret 的
+# MYSQL_PASSWORD，不用再手動維護兩份一樣的密碼。
+# Secret 本身預設只是 base64 編碼、不是加密，這裡仍用 stringData 明文
+# 示範，正式環境要搭配 RBAC 或 Sealed Secrets / External Secrets / Vault。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: flarum
+type: Opaque
+stringData:
+  # 04-mysql-statefulset.yaml 用 envFrom.secretRef 把這整份 Secret 的四個
+  # key 一次性全部注入成環境變數——這是 mysql 官方 image 的 entrypoint
+  # 認得的變數名稱，用來在第一次啟動時初始化 root 密碼、預設資料庫，
+  # 以及一組非 root 的應用程式帳號。
+  MYSQL_ROOT_PASSWORD: "TrainingRoot123!"
+  # image 第一次啟動（initdb）時會自動建立這個名稱的資料庫。
+  MYSQL_DATABASE: "appdb"
+  # 連同下面的密碼，一起自動建立這個非 root 帳號，並預設授權存取
+  # 上面 MYSQL_DATABASE 這顆資料庫——07 號檔案的 flarum Deployment
+  # 就是用這組帳密連線，而不是用 root。
+  MYSQL_USER: "appuser"
+  # 07 號檔案的 flarum Deployment 用 secretKeyRef 讀這個 key（key 名稱
+  # 是 MYSQL_PASSWORD，不是 DB_PASS，兩者要對應對）。
+  MYSQL_PASSWORD: "TrainingApp123!"
+---
+# Step 4：mysql 的 Headless Service（clusterIP: None）
+# 教學重點：StatefulSet 搭配 Headless Service，才能拿到穩定的 DNS 名稱
+# （mysql-0.mysql.flarum.svc.cluster.local）。因為現在跟 flarum 同一個
+# namespace，flarum Deployment 直接用短名 `mysql` 就能連到，不需要像
+# 以前獨立成 mysql 產品時那樣寫完整的跨 namespace FQDN。
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: flarum
+  labels:
+    app: mysql
+spec:
+  # clusterIP: None 就是「Headless」——不配虛擬 IP，DNS 查詢這個
+  # Service 名稱時會直接回傳背後每個 Pod 各自的 IP（例如 mysql-0），
+  # 這樣 StatefulSet 的每個 Pod 才有各自穩定、可被單獨定址的網路身分，
+  # 不會像一般 ClusterIP Service 那樣把流量打散到任一個 Pod。
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+    - name: mysql
+      # Service 對外（叢集內）曝露的 port。
+      port: 3306
+      # 轉送到 Pod 的哪個 port；用名稱 mysql 對應 StatefulSet 裡
+      # containerPort 宣告的 name，不用寫死數字。
+      targetPort: mysql
+---
+# Step 5：用 StatefulSet（而不是 Deployment）跑資料庫
+# 教學重點：
+#   - 這裡把 mysql 併進 flarum 這個 namespace，而不是獨立一個產品——
+#     跟 planka 把 postgres 併進自己 namespace 的理由完全一樣：盤點下來
+#     mysql 從頭到尾只有 flarum 一個消費者，沒有其他 namespace 要共用，
+#     獨立成一個「共用資料庫產品」反而多一層不必要的跨 namespace
+#     NetworkPolicy。如果之後真的出現第二個消費者，才需要拆回獨立產品。
+#   - StatefulSet 提供穩定的 Pod 名稱（mysql-0）、穩定的網路身分（搭配
+#     Headless Service）、以及 volumeClaimTemplates —— 每個 Pod 各自拿到
+#     專屬的 PVC，並且 Pod 重建後會重新綁定「同一顆」PVC，這是跟
+#     Deployment 最大的不同。
+#   - replicas 只開 1：一般 MySQL 沒有內建多主複寫，多開幾個 replicas
+#     並不會變成一個資料庫叢集，只會變成好幾個各自獨立、資料不同步的
+#     MySQL，這點務必跟學員澄清。
+#   - securityContext 沒有強制 runAsNonRoot、也沒有 drop capabilities：
+#     官方 mysql image 的 entrypoint 以 root 啟動 mysqld 後，會呼叫
+#     setuid()/setgid() 把行程權限降級成內部的 mysql（uid/gid 999）
+#     使用者，這個降級動作本身就需要 CAP_SETUID/CAP_SETGID；如果把
+#     capabilities 全部 drop 掉，mysqld 會直接啟動失敗（實測過：
+#     `setgid: Operation not permitted`）。這是「資料庫類 image 的安全
+#     強化，往往要跟著官方 image 的設計走，不能每個產品都套用同一套
+#     hardening」的實務案例。
+#   - livenessProbe 的 initialDelaySeconds 刻意拉高到 60（實測踩到的坑）：
+#     mysql 官方 image 第一次啟動（initdb + 建立 root/appuser 密碼與權限）
+#     在這座叢集上實測要跑到 90 幾秒才會真正 ready，如果 initialDelaySeconds
+#     設太短（例如 30），livenessProbe 會在 initdb 中途就判定容器沒活著、
+#     直接把容器殺掉重啟——結果是 root/appuser 的密碼與授權設定只做到一半
+#     就中斷，之後不管密碼打對打錯都連不進去（`Host 'x.x.x.x' is not
+#     allowed to connect`），只能刪掉 PVC 重來。跟 readinessProbe 不同，
+#     livenessProbe 失敗是「直接砍容器」，第一次啟動類的初始化流程一定要
+#     抓夠寬鬆的 initialDelaySeconds，不能照抄一般應用程式的節奏。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: flarum
+spec:
+  # 要搭配哪個 Headless Service（03-mysql-service.yaml）才能讓每個 Pod
+  # 拿到形如 mysql-0.mysql.flarum.svc.cluster.local 的穩定 DNS 名稱；
+  # 這個名稱必須跟該 Headless Service 的 metadata.name 一致。
+  serviceName: mysql
+  # 見上方教學重點：MySQL 沒有內建多主複寫，這裡不能靠調高 replicas
+  # 來擴充，只能維持 1。
+  replicas: 1
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      # k8s01~03 這座訓練叢集是跟其他團隊共用的實體節點，記憶體長期
+      # 吃緊（曾量到 100%+），gpu01 平常只有 GPU 相關工作負載會用到、
+      # 平時閒置，這裡跟 onlyoffice/peertube 一樣，把資料庫類重量級
+      # 工作負載排到 gpu01，並容忍它預留給 GPU 工作負載的 taint。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: mysql
+          image: mysql:8.0.40
+          # 一次性把 02-mysql-secret.yaml 整份 Secret 的所有 key 匯入成
+          # 同名環境變數（MYSQL_ROOT_PASSWORD/MYSQL_DATABASE/MYSQL_USER/
+          # MYSQL_PASSWORD），image 的 entrypoint 認得這些變數名稱，
+          # 只在資料目錄是空的（第一次啟動）時才會拿來做 initdb 初始化。
+          envFrom:
+            - secretRef:
+                name: mysql-secret
+          ports:
+            # 純宣告用途，方便下面用名稱 mysql 被 probe/Service 引用。
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+          resources:
+            # requests：排程器保證一定拿得到的資源量。
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            # limits：實際執行時的封頂值；這組數字比 flarum 應用容器高，
+            # 也是 01 號檔案 LimitRange.max 要跟著調高的原因。
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # readinessProbe：實際跑一次 mysqladmin ping 檢查 mysqld 是否
+          # 真的能接受連線（而不是只看 port 通不通），失敗只會把 Pod
+          # 從 Service 的 Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+            # 容器啟動後等 20 秒才開始第一次探測。
+            initialDelaySeconds: 20
+            # 之後每 10 秒探測一次。
+            periodSeconds: 10
+            # 單次探測超過 5 秒沒回應就視為失敗。
+            timeoutSeconds: 5
+            # 連續失敗 3 次，才標記為 NotReady。
+            failureThreshold: 3
+          # livenessProbe：只用 tcpSocket（port 通不通）判斷活著沒，
+          # 比 readinessProbe 的實際登入探測更寬鬆——因為失敗的代價是
+          # 直接砍容器，探測方式要挑不容易誤判的。
+          livenessProbe:
+            tcpSocket:
+              port: mysql
+            # 這裡的 60 秒就是上方教學重點提到、實測踩坑調出來的值，
+            # 理由請見檔案最上面的說明，這裡不重複。
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 3
+            # 容忍 4 次失敗（比一般應用的 3 次再寬鬆一點）才重啟容器，
+            # 進一步降低誤殺正在初始化的 mysqld 的機率。
+            failureThreshold: 4
+          securityContext:
+            # 禁止容器內程序透過 setuid 之類手法再拿到更高權限；
+            # 這一條跟「不 drop capabilities」不衝突，setuid()/setgid()
+            # 是 entrypoint 主動降權用掉既有的 CAP_SETUID/CAP_SETGID，
+            # 不是靠 allowPrivilegeEscalation 去提權。
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            # 掛到 mysql 官方 image 預設的資料目錄；這個路徑底下的內容
+            # 由下面 volumeClaimTemplates 產生的 PVC 提供，容器重建後
+            # 資料不會遺失。
+            - name: data
+              mountPath: /var/lib/mysql
+      securityContext:
+        # Pod 層級：掛進來的 Volume 會被強制改成這個 group 擁有
+        # （999 是 mysql image 內建的 mysql 使用者 gid），讓 mysqld
+        # 降權後的非 root 身分也能讀寫 /var/lib/mysql。
+        fsGroup: 999
+  volumeClaimTemplates:
+    # StatefulSet 特有欄位：跟 Deployment 用同一顆共用 PVC 不同，這裡是
+    # 「範本」，StatefulSet 會依此幫每個 Pod（這裡只有 mysql-0）各自建立
+    # 一顆專屬 PVC（例如 data-mysql-0），Pod 重建後仍會綁回同一顆，
+    # 資料才不會因為 Pod 被砍掉重建而消失。
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce：同時間只能被一個節點掛載——replicas 本來就只有
+        # 1，這裡不需要 RWX，也符合一般 block storage 的限制。
+        accessModes:
+          - ReadWriteOnce
+        # 使用哪個 StorageClass 提供實際的儲存空間；rook-ceph-block 是
+        # 這座叢集的 block storage（對照 flarum-assets 用的 rook-cephfs
+        # 檔案系統儲存）。
+        storageClassName: rook-ceph-block
+        resources:
+          requests:
+            storage: 5Gi
+---
+# Step 6：flarum 自己的 Secret
+# 教學重點：mysql 的密碼現在是同一個 namespace 裡的另一個 Secret 物件
+# （02-mysql-secret.yaml），07 號檔案的 Deployment 直接用 secretKeyRef
+# 讀那個 Secret 的 MYSQL_PASSWORD，這裡不用再重複存一份 DB_PASS——
+# 「Secret 是 namespace-scoped、不能跨 namespace 引用」的限制，在
+# mysql 還是獨立產品時才會遇到；併進同一個 namespace 後，同 namespace
+# 內的多個 Secret 物件是可以互相被 Pod 讀取組合的。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flarum-secret
+  namespace: flarum
+type: Opaque
+stringData:
+  # 07 號檔案的 Deployment 用 secretKeyRef 讀這個 key，餵給 image 的
+  # FLARUM_ADMIN_PASS 環境變數——只在初次安裝時用來建立管理員帳號，
+  # 之後改密碼要直接在 Flarum 後台改，不會回寫這個 Secret。
+  FLARUM_ADMIN_PASS: "TrainingAdmin123!"
+---
+# Step 4：持久化儲存
+# 教學重點（重要坑，實測過才發現）：
+#   flarum 這個 image（mondedie/flarum）把整個 Flarum 程式（vendor/、
+#   composer.lock、核心程式碼）直接烘進 image 的 /flarum/app 路徑。
+#   很多 docker-compose 教學會直接把整個 /flarum/app 掛成一個 volume——
+#   這在 Docker 是可行的（Docker 對「全新的具名 volume」會自動複製
+#   image 內原本的內容進去），但在 Kubernetes 完全不是這樣：PVC 掛上去
+#   就是「蓋掉」該路徑，image 裡原本的檔案會直接消失不見，
+#   結果就是程式碼整包不見、容器起不來。
+#   所以這裡刻意只掛「資料類」的子目錄，而不是整個 /flarum/app：
+#     - flarum-storage -> /flarum/app/storage（log、cache、session 等執行期資料）
+#       用 RWO + rook-ceph-block：只有一個 replica 在寫，不需要多寫者。
+#     - flarum-assets  -> /flarum/app/public/assets（頭像、上傳的附加檔）
+#       用 RWX + rook-cephfs：模擬「未來要多 replica 一起讀寫上傳檔案」的情境，
+#       跟 filebrowser 的 RWX 選型呼應。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flarum-storage
+  namespace: flarum
+spec:
+  # ReadWriteOnce：只有 1 個 replica 在寫（見下面 07 號檔案的
+  # replicas: 1），不需要多節點同時掛載，用一般 block storage 即可。
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flarum-assets
+  namespace: flarum
+spec:
+  # ReadWriteMany：刻意選跟上面不同的存取模式，模擬「未來要多 replica
+  # 同時讀寫上傳檔案」的情境，因此要用支援多節點同時掛載的 storageClass
+  # （rook-cephfs），跟 flarum-storage 的 rook-ceph-block 選型呼應對照。
+  accessModes:
+    - ReadWriteMany
+  storageClassName: rook-cephfs
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Step 7：部署 flarum 本體
+# 教學重點：
+#   - initContainer：這是本課程第一次出現 initContainer。
+#     flarum-storage / flarum-assets 這兩顆 PVC 一開始是空的，但 Flarum
+#     程式期待 storage/、public/assets/ 底下已經有特定子目錄結構
+#     （storage/logs、storage/cache、public/assets/avatars…），
+#     所以在主容器啟動前，先用一個 initContainer 把這些子目錄建好、
+#     並且 chown 成容器實際執行的 uid/gid（991:991），主程式才能正常寫入。
+#   - replicas 只開 1、strategy 用 Recreate：flarum-storage 是 RWO，
+#     同時間只能被一個 Pod 掛載，滾動更新（同時存在新舊兩個 Pod）會卡住；
+#     且 Flarum 沒有內建跨 Pod 共享 session/cache 的機制——如果之後這門課
+#     教到 Redis，可以回頭示範「加一個共用 cache/session 後端，
+#     才有辦法安全地水平擴展這種傳統 PHP 應用」。
+#   - securityContext 沒有 drop capabilities：跟 mysql 同樣的教訓——
+#     這個 image 的 entrypoint 會以 root 執行 chown 把 /flarum 目錄
+#     交給內部的 991:991 使用者，再 su-exec 降權執行，drop 掉
+#     CAP_CHOWN/CAP_SETUID/CAP_SETGID 會讓它啟動失敗。
+#   - DB_HOST 指到同 namespace 裡 mysql 的 headless service 短名
+#     （不需要完整 FQDN）；DB_PASS 直接用 secretKeyRef 讀 02-mysql-secret.yaml
+#     裡的 MYSQL_PASSWORD，同一個 namespace 內的不同 Secret 物件可以互相
+#     被 Pod 讀取組合，不需要像以前 mysql 是獨立產品時那樣手動複製一份
+#     密碼到 flarum 自己的 Secret。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flarum
+  namespace: flarum
+  labels:
+    app: flarum
+spec:
+  # 見上方教學重點：flarum-storage 是 RWO，只能同時給一個 Pod 掛載。
+  replicas: 1
+  strategy:
+    # Recreate：更新時先砍掉舊 Pod，等它完全終止、釋放掉 RWO 的 PVC，
+    # 才建立新 Pod（對照 RollingUpdate 會讓新舊 Pod 同時存在一小段時間，
+    # 這裡因為 PVC 是 RWO 所以不能那樣做，更新期間會有短暫服務中斷）。
+    type: Recreate
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: flarum
+  template:
+    metadata:
+      labels:
+        app: flarum
+    spec:
+      # 跟同 namespace 的 mysql 排到同一台 gpu01，理由同前（見
+      # 04-mysql-statefulset.yaml 的說明：k8s01~03 記憶體吃緊，
+      # gpu01 平時閒置）；同一 namespace 的 app/db 排在同一台節點上，
+      # 彼此走內部網路，延遲也更低。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # enableServiceLinks: false（實測踩到的真坑）
+      # Kubernetes 預設會幫每個 Pod 依「目前 namespace 看得到的所有 Service」
+      # 自動注入一組 Docker-links 風格的環境變數，例如 Service 叫 flarum、
+      # port 叫 80，就會注入 FLARUM_PORT=tcp://<clusterIP>:80。
+      # 這個產品剛好自己也定義了一個叫 FLARUM_PORT 的環境變數（nginx 監聽埠），
+      # 兩者「撞名」，實測發現 K8s 自動注入的值會蓋掉 image 原本的
+      # FLARUM_PORT=8888，害 nginx 設定檔套用到錯誤的值直接啟動失敗。
+      # 這裡我們用的是 DNS-based 服務發現（DB_HOST 直接寫 FQDN），
+      # 完全不需要這組舊式 env-var 注入，直接關掉最乾淨。
+      enableServiceLinks: false
+      initContainers:
+        - name: init-storage-dirs
+          # 用最小的 busybox 而不是 flarum 本尊的 image，只是為了跑幾行
+          # shell 建目錄/改權限，開機快、也不會意外把應用程式的 entrypoint
+          # 邏輯跑一次。
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /storage/formatter /storage/sessions /storage/logs /storage/tmp \
+                       /storage/cache /storage/less /storage/views /storage/locale
+              mkdir -p /assets/avatars
+              # 991:991 是主容器內 Flarum 程式實際執行的 uid/gid，這裡先
+              # 用 initContainer（此時還是 root）把兩顆空 PVC 的目錄結構
+              # 建好並改成該身分擁有，主容器降權後才寫得進去。
+              chown -R 991:991 /storage /assets
+          volumeMounts:
+            # 這裡掛載路徑是 /storage、/assets（不是主容器的
+            # /flarum/app/storage），因為 initContainer 只需要碰到這兩顆
+            # PVC 本身，不需要也沒有 image 烘進去的其他 Flarum 程式碼。
+            - name: storage
+              mountPath: /storage
+            - name: assets
+              mountPath: /assets
+      containers:
+        - name: flarum
+          image: mondedie/flarum:latest
+          # IfNotPresent：節點上已有這個 image 就直接用，不重新拉取；
+          # 這裡用的是 :latest tag，示範時若要確保拿到最新版本，
+          # 需手動改成 Always 或換成明確版本號 tag。
+          imagePullPolicy: IfNotPresent
+          env:
+            # 以下 DB_* 是 mondedie/flarum image 認得的環境變數，容器
+            # entrypoint 會拿這些值去產生 Flarum 的資料庫連線設定。
+            - name: DB_HOST
+              # 同 namespace 內用短名即可連到 03-mysql-service.yaml
+              # 這個 Headless Service，不需要完整 FQDN。
+              value: "mysql"
+            - name: DB_PORT
+              value: "3306"
+            # 這三個值要跟 02-mysql-secret.yaml 裡 mysql 初始化時建立的
+            # 資料庫/帳號完全對應，任何一個對不上都會連線失敗。
+            - name: DB_NAME
+              value: "appdb"
+            - name: DB_USER
+              value: "appuser"
+            - name: DB_PASS
+              # 直接讀 02-mysql-secret.yaml 的 MYSQL_PASSWORD key
+              # （key 名稱不同，值相同），同 namespace 內的 Secret
+              # 可以互相被不同的 Pod 讀取組合。
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_PASSWORD
+            # 資料表前綴，留空代表不加前綴（單一應用獨佔這顆資料庫，
+            # 不需要靠前綴區分多個應用共用同一顆 DB 的資料表）。
+            - name: DB_PREF
+              value: ""
+            # Flarum 產生連結、靜態資源網址時使用的對外網址，必須跟
+            # 09-httproute.yaml 的 hostnames 一致，否則頁面資源會 404。
+            - name: FORUM_URL
+              value: "http://flarum.nexai.org.com"
+            - name: FLARUM_TITLE
+              value: "K8s Training Forum"
+            # 以下三個 ADMIN_* 只在第一次安裝（資料庫是全新的）時生效，
+            # 用來建立初始管理員帳號；之後修改這裡不會回頭改掉已存在的帳號。
+            - name: FLARUM_ADMIN_USER
+              value: "admin"
+            - name: FLARUM_ADMIN_MAIL
+              value: "admin@example.com"
+            - name: FLARUM_ADMIN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: flarum-secret
+                  key: FLARUM_ADMIN_PASS
+            # 要求應用程式把 log 寫到容器的 stdout/stderr，才能用
+            # `kubectl logs` 直接看到，不用另外進容器看檔案。
+            - name: LOG_TO_STDOUT
+              value: "true"
+          ports:
+            # 純宣告用途，方便用名稱 http 被下面 probe/Service 引用。
+            - name: http
+              # image 內建 nginx 實際監聽的埠（由 FLARUM_PORT 環境變數
+              # 控制，這裡沿用 image 預設值，沒有另外宣告該變數）。
+              containerPort: 8888
+              protocol: TCP
+          resources:
+            # requests：排程器保證一定拿得到的資源量。
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            # limits：實際執行時的封頂值，超過 memory 會被 OOMKilled。
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          # readinessProbe：探測「現在能不能收流量」，失敗只會把 Pod
+          # 從 Service 的 Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            # PHP 應用 + 要等資料庫連得上，開機比純靜態服務慢，先給 30 秒。
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # 容忍到 6 次失敗才轉 NotReady，避免資料庫初次建置較久時
+            # 被誤判成「還沒準備好」而抖動。
+            failureThreshold: 6
+          # livenessProbe：失敗會直接重啟容器，數值要比 readinessProbe
+          # 更保守，initialDelaySeconds 特地拉到 60 避免安裝過程被誤殺。
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            # 只掛「資料類」子目錄，不是整個 /flarum/app——理由見檔案
+            # 最上面的教學重點（image 把程式碼烘進 /flarum/app，整包掛
+            # PVC 上去會蓋掉程式碼）。
+            - name: storage
+              mountPath: /flarum/app/storage
+            - name: assets
+              mountPath: /flarum/app/public/assets
+      securityContext:
+        # Pod 層級：掛進來的 Volume 會被強制改成這個 group 擁有
+        # （991 是 image 內部實際執行 Flarum 的使用者 gid）。
+        fsGroup: 991
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: flarum-storage
+        - name: assets
+          persistentVolumeClaim:
+            claimName: flarum-assets
+---
+# Step 8：建立 ClusterIP Service，作為 flarum Pod 的穩定進入點
+# 教學重點：Pod 會因為 Recreate 更新而換 IP，Service 透過 label selector
+# 提供一個穩定的虛擬 IP + DNS 名稱（flarum.flarum.svc.cluster.local）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: flarum
+  namespace: flarum
+  labels:
+    app: flarum
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute，不需要也不應該在這裡開 NodePort/LoadBalancer。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: flarum
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；用名稱 http 對應 Deployment 裡
+      # containerPort 宣告的 name，不用寫死數字 8888。
+      targetPort: http
+---
+# 前置條件：先套用 ../../shared-infra/00-dev-gateway.yaml
+# 注意：hostnames 這裡要跟 04-deployment.yaml 的 FORUM_URL 一致，
+# 不然 Flarum 產生的靜態資源網址會跟實際存取網址對不上。
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: flarum
+  namespace: flarum
+spec:
+  # 這個 HTTPRoute 要掛到哪個/哪些 Gateway 的哪個 listener 上；
+  # 兩筆都掛代表 http 跟 https 的流量都會被導進來。
+  parentRefs:
+    - name: dev-gateway
+      namespace: default
+      sectionName: http
+    - name: dev-gateway
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手（同一個
+  # Gateway 可以同時掛很多產品，靠 hostname 分流）；務必跟上面提醒的
+  # FORUM_URL 保持一致。
+  hostnames:
+    - "flarum.nexai.org.com"
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 08-flarum-service.yaml）。
+        - name: flarum
+          port: 80
+---
+# Step 10（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 教學重點：跟 planka 的 postgres 一樣，示範「同一個 namespace 內部的
+# 服務隔離」——mysql 只允許同 namespace 裡貼 app=flarum 標籤的 Pod
+# 連進來，其他 Pod（就算在同一個 namespace）一樣連不到。這是 mysql
+# 還是獨立產品時「跨 namespace namespaceSelector」寫法的對照組：
+# 併進同一個 namespace 後，改用 podSelector 做服務間的零信任隔離。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: flarum
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-flarum-from-gateway
+  namespace: flarum
+spec:
+  # 只對帶 app: flarum 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: flarum
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但仍限制只開放 8888 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 8888
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-mysql-from-flarum
+  namespace: flarum
+spec:
+  # 只對帶 app: mysql 這個 label 的 Pod 生效（mysql 這一側的進站規則）。
+  podSelector:
+    matchLabels:
+      app: mysql
+  policyTypes:
+    - Ingress
+  ingress:
+    # 只允許同 namespace 裡帶 app: flarum 標籤的 Pod 連進來——這是
+    # mysql 併進同一個 namespace 後改用 podSelector 做零信任隔離的寫法，
+    # 對照 mysql 還是獨立產品時得用 namespaceSelector 跨 namespace 白名單。
+    - from:
+        - podSelector:
+            matchLabels:
+              app: flarum
+      ports:
+        - protocol: TCP
+          port: 3306
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: flarum
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-flarum-to-mysql
+  namespace: flarum
+spec:
+  # 這是上面 allow-ingress-to-mysql-from-flarum 的另一半——egress 跟
+  # ingress 是分開管制的，flarum 這一側也要單獨開通「可以連出去」，
+  # 光靠 mysql 那份 policy 允許進站是不夠的。
+  podSelector:
+    matchLabels:
+      app: flarum
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mysql
+      ports:
+        - protocol: TCP
+          port: 3306
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-mysql-from-cloudbeaver
+  namespace: flarum
+spec:
+  podSelector:
+    matchLabels:
+      app: mysql
+  policyTypes:
+    - Ingress
+  ingress:
+    # 額外開放給 cloudbeaver 這個「跨 namespace」的資料庫管理工具連線
+    # （例如上課用來直接檢視/操作 mysql 資料表），用 namespaceSelector
+    # 比對該 Pod 所在 namespace 的內建標籤
+    # kubernetes.io/metadata.name，不需要額外手動貼標籤。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudbeaver
+      ports:
+        - protocol: TCP
+          port: 3306

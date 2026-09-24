@@ -1,0 +1,31 @@
+# Step 6（進階）：水平自動擴縮
+# 教學重點：HPA 依據 CPU 使用率（來自 metrics-server，此叢集已安裝）
+# 動態調整 replicas。可以在課堂上用 `kubectl run` + hey/ab 對 Service 施壓，
+# 實際觀察 replicas 從 2 -> 更多的過程。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: drawio
+  namespace: drawio
+spec:
+  # 要對哪個工作負載做自動擴縮。
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: drawio
+  # 不管流量多低，都至少維持 2 個 replicas（對照 Deployment 原本的
+  # replicas: 2，HPA 接手後這個欄位才是真正生效的下限）。
+  minReplicas: 2
+  # 流量再高，也最多只擴到 5 個 replicas，避免把 ResourceQuota 吃光。
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          # Utilization：跟「容器 requests 設的 CPU」比較的使用率百分比，
+          # 不是跟節點總 CPU 比。
+          type: Utilization
+          # 所有 Pod 的平均 CPU 使用率超過 requests 的 70% 就觸發擴容，
+          # 低於就慢慢縮容（縮容有內建的冷卻時間，不會瞬間砍下去）。
+          averageUtilization: 70

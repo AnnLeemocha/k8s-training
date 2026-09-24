@@ -1,0 +1,167 @@
+# peertube Helm Chart 預設值
+# 注意：namespace 不由這個 chart 建立，請先手動建立或套用
+# ../manifest/00-namespace.yaml，再用
+# `helm install peertube ./chart -n peertube` 安裝。
+#
+# 下面每個欄位都標註「哪個 template 會用到」。這是全教材整合度最高的
+# 產品：PostgreSQL（StatefulSet+PVC）+ Redis（Deployment+emptyDir，
+# 刻意不用 PVC，示範「可接受資料遺失」跟「不可接受」兩種持久化策略的
+# 對照）+ PeerTube 本身，三個元件都釘在同一個 GPU 節點上。
+
+# 把三個元件（postgres/redis/peertube）都釘在 gpu01 節點
+# （templates/postgres.yaml、templates/redis.yaml、templates/peertube.yaml
+# 各自的 nodeSelector/tolerations）。本叢集 k8s01~03 記憶體長期在
+# 81-91% 使用率，這個產品的三個 workload 加總扛不住，只能放到記憶體較
+# 空但帶 nvidia.com/gpu=true:NoSchedule taint 的 gpu01，需要對應的
+# toleration 才排得進去。
+nodePlacement:
+  nodeSelector:
+    kubernetes.io/hostname: gpu01
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+
+# postgres StatefulSet（templates/postgres.yaml），搭配 ConfigMap 掛載
+# 到 /docker-entrypoint-initdb.d/ 自動安裝 pg_trgm/unaccent 兩個
+# PeerTube 需要的 PostgreSQL extension。官方 postgres image 的
+# entrypoint 需要用 root 身分自降權，不能套用
+# capabilities.drop: [ALL]。
+postgres:
+  image:
+    repository: postgres
+    tag: "16.4-alpine"
+  # 寫進 templates/postgres.yaml 的 Secret（POSTGRES_USER/
+  # POSTGRES_PASSWORD/POSTGRES_DB）。PEERTUBE_DB_PASSWORD 也是讀這裡的
+  # password（見 templates/peertube.yaml 的 peertube-secret），同一份
+  # 密碼不重複填。注意：這組帳密只在 PVC 第一次 initdb 時套用，改密碼
+  # 得先清空 PVC 才會生效。
+  auth:
+    user: "peertube"
+    password: "TrainingPeertube123"
+    database: "peertube"
+  # postgres 資料目錄的 PVC（templates/postgres.yaml 的
+  # volumeClaimTemplates），單寫用 rook-ceph-block（RWO）。
+  persistence:
+    storageClassName: rook-ceph-block
+    size: 5Gi
+  # postgres 容器的資源請求/上限（templates/postgres.yaml），跟
+  # redis.resources、peertube.resources 一起算進下面的
+  # resourceQuota/limitRange。
+  # 教學提醒：跟 flarum 併 mysql 時踩過同一個坑——StatefulSet 的
+  # livenessProbe.initialDelaySeconds 太短會在首次 initdb 過程中殺掉
+  # 容器，讓帳密設定「半完成」而永久鎖死；這裡尚未實際踩過（gpu01 記憶體
+  # 較寬裕），但仍是同一個潛在風險，若曾經清空過 PVC 重新初始化，記得
+  # 檢查這個值夠不夠長。
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# redis Deployment（templates/redis.yaml），用 emptyDir 不用 PVC——
+# job queue/cache 資料重啟遺失是可接受的，刻意跟 postgres 的
+# StatefulSet+PVC 做對照。官方 redis image 一樣需要 root 自降權，不能
+# 套用 capabilities.drop: [ALL]。
+redis:
+  image:
+    repository: redis
+    tag: "7.4-alpine"
+  # redis 容器的資源請求/上限（templates/redis.yaml）。
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# PeerTube 應用本身（templates/peertube.yaml）。
+peertube:
+  # chocobozzz/peertube 官方映像同樣需要 root 自降權（設定完檔案權限後
+  # 才切到 peertube 使用者），不能套用 capabilities.drop: [ALL]。
+  image:
+    repository: chocobozzz/peertube
+    tag: "production-bookworm"
+  # 寫進 templates/httproute.yaml 的 hostnames，以及
+  # templates/peertube.yaml 的環境變數 PEERTUBE_WEBSERVER_HOSTNAME。
+  # 教學重點：PEERTUBE_WEBSERVER_HOSTNAME/PORT/HTTPS 描述的是「使用者
+  # 從外部連進來」看到的 scheme/port（走 Gateway 的 443/https），跟
+  # 容器實際監聽的 containerPort 9000 是兩個不同的概念——PeerTube 需要
+  # 知道自己「對外」是用 https 連的，才能正確產生內部連結、WebSocket
+  # 位址等，這在 reverse-proxy 架構下很常見但容易搞混。
+  webserverHostname: "peertube.nexai.org.com"
+  # 寫進 templates/peertube.yaml 產生的 peertube-secret（PEERTUBE_SECRET/
+  # PEERTUBE_ADMIN_EMAIL/PT_INITIAL_ROOT_PASSWORD）。secret 是 PeerTube
+  # 內部用來加密 session/cookie 的密鑰，跟 JWT_SECRET 之類的整合密鑰無關。
+  secret: "TrainingOnlyPeertubeSecret_ChangeMeInProduction"
+  adminEmail: "admin@example.com"
+  # PT_INITIAL_ROOT_PASSWORD 只在資料庫是空的（第一次啟動）時才會拿來
+  # 建立 root 使用者；建立後 PeerTube 只把密碼雜湊存進 DB，不會再印出來
+  # 也讀不回明文，之後改這裡的值不會生效。務必在第一次部署後立刻從
+  # pod 開機日誌把這組密碼記下來，之後也無法從 DB 復原。
+  rootPassword: "TrainingPeertubeRoot123"
+  # PeerTube 影片/縮圖等資料的 PVC（templates/peertube.yaml），只掛
+  # /app/storage 這個子路徑，單寫用 rook-ceph-block（RWO）。
+  persistence:
+    storageClassName: rook-ceph-block
+    size: 10Gi
+  # PeerTube 容器的資源請求/上限（templates/peertube.yaml）。
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# Namespace 層級總量配額（templates/resourcequota.yaml）。這裡的數字要
+# 同時覆蓋 postgres + redis + peertube 三個 workload 的加總，是全教材
+# 資源需求最高的 namespace 之一。
+resourceQuota:
+  enabled: true
+  requestsCpu: "2"
+  requestsMemory: 3Gi
+  limitsCpu: "4"
+  limitsMemory: 6Gi
+  pods: "6"
+  persistentVolumeClaims: "4"
+  requestsStorage: 30Gi
+
+# Namespace 層級單一容器的地板/天花板（templates/resourcequota.yaml 裡
+# 的 LimitRange）。max 必須 ≥ 三個元件裡 resources.limits 最大的那個，
+# min 必須 ≤ 三個元件裡 resources.requests 最小的那個（這裡是 redis 的
+# 50m/128Mi）。
+limitRange:
+  enabled: true
+  default:
+    cpu: 500m
+    memory: 1Gi
+  defaultRequest:
+    cpu: 100m
+    memory: 256Mi
+  max:
+    cpu: "2"
+    memory: 3Gi
+  min:
+    cpu: 50m
+    memory: 64Mi
+
+# HTTPRoute 掛的 Gateway（templates/httproute.yaml 的
+# spec.parentRefs）。hostnames 直接讀上面 peertube.webserverHostname，
+# 不在這裡重複填一次。
+gateway:
+  name: dev-gateway
+  namespace: default
+
+# NetworkPolicy（templates/networkpolicy.yaml）：default-deny 之後
+# 開放——Gateway 進來的 9000 port（PeerTube 容器實際監聽的 port）、
+# DNS、postgres 只准 peertube Pod 連 5432、redis 只准 peertube Pod 連
+# 6379（same-namespace podSelector-to-podSelector，跟 planka 的
+# postgres 隔離模式一致）。這個產品的 NetworkPolicy 規則數是全教材
+# 最多的（7 條）。
+networkPolicy:
+  enabled: true

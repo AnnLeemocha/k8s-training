@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: peertube
+  namespace: peertube
+  labels:
+    app: peertube
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: __FILL_ME_36__
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；對應 09 裡容器實際監聽的 9000
+      # （用名稱 http 引用，不用寫死數字）。
+      targetPort: __FILL_ME_37__

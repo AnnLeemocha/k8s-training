@@ -1,0 +1,123 @@
+# Step 5：PostgreSQL StatefulSet
+# 教學重點：
+#   - 跟 mysql 產品同樣的教訓——官方 postgres image 的 entrypoint 也是
+#     先以 root 啟動、chown 資料目錄給內部的 postgres 使用者後再降權
+#     執行，所以一樣不 drop capabilities。
+#   - PGDATA 特別指到子目錄（/var/lib/postgresql/data/pgdata），而不是
+#     直接用掛載點根目錄：這是官方 image 文件建議的標準做法，因為
+#     Ceph RBD 格式化成 ext4 後，掛載點根目錄一開始就會有一個
+#     lost+found 資料夾，postgres 的 initdb 一看到資料目錄「不是空的」
+#     就會直接拒絕啟動；指到子目錄就能避開這個問題。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: planka
+spec:
+  # 搭配 03-postgres-service.yaml 的 Headless Service 名稱，StatefulSet
+  # 才會幫每個 Pod 建立可預期的 DNS 紀錄（postgres-0.postgres...）。
+  serviceName: postgres
+  # 只開 1：一般 PostgreSQL 沒有內建多主複寫，多開幾個 replicas並不會
+  # 變成資料庫叢集，只會變成好幾個各自獨立、資料不同步的 postgres。
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # k8s01~03 這座訓練叢集是跟其他團隊共用的實體節點，記憶體長期
+      # 吃緊（曾量到 100%+），gpu01 平常只有 GPU 相關工作負載會用到、
+      # 平時閒置，這裡跟 onlyoffice/peertube 一樣，把資料庫類重量級
+      # 工作負載排到 gpu01，並容忍它預留給 GPU 工作負載的 taint。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine
+          # 把 02-postgres-secret.yaml 的三個鍵一次全部注入成環境變數，
+          # 官方 postgres image 的 entrypoint 會讀 POSTGRES_USER/
+          # POSTGRES_PASSWORD/POSTGRES_DB 做首次初始化。
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            # PGDATA 指到掛載點底下的子目錄，而不是掛載點根目錄本身：
+            # Ceph RBD 格式化成 ext4 後，掛載點根目錄一開始就會有一個
+            # lost+found 資料夾，initdb 一看到資料目錄「不是空的」就會
+            # 直接拒絕啟動；指到子目錄可以避開這個問題（官方 image 文件
+            # 建議的標準做法）。
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            # 純宣告用途，方便用名稱 postgres 被下面的 probe/Service 引用。
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            # 用 postgres 官方隨附的 pg_isready 工具，比單純探測 port
+            # 更準確：port 通了不代表資料庫已經初始化/可以接受連線。
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            # 這裡只探測 TCP port 有沒有通，不像 readinessProbe 用
+            # pg_isready：livenessProbe 失敗會直接砍容器重啟，是比較
+            # 激進的處置，通常會刻意選比較寬鬆、成本低的檢查方式，
+            # 避免資料庫忙碌（例如長查詢）時被 pg_isready 誤判成掛掉、
+            # 平白重啟一個其實還活著的資料庫（一般 K8s 實務上的常見
+            # 考量，非本專案實測踩過的坑）。
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            # 官方 postgres image 的 entrypoint 一樣是先以 root 啟動、
+            # chown 資料目錄給內部的 postgres 使用者後再降權執行，這個
+            # 降級動作需要 CAP_SETUID/CAP_SETGID，所以這裡不 drop
+            # capabilities（跟 mysql 同一種資料庫類 image 的限制）。
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 999 是 postgres 官方 image 內建的 postgres 使用者 gid。
+        fsGroup: 999
+  volumeClaimTemplates:
+    # volumeClaimTemplates（而不是一般的 volumes + PVC）是 StatefulSet
+    # 特有的欄位：每個 Pod 各自拿到專屬的 PVC，並且 Pod 重建後會重新
+    # 綁定「同一顆」PVC，資料不會因為 Pod 重啟而不見。
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce：同時間只能被一個節點掛載，資料庫類單一
+        # instance 本來就只需要一個 Pod 讀寫，不需要 RWX。
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: rook-ceph-block
+        resources:
+          requests:
+            storage: 5Gi

@@ -1,0 +1,20 @@
+# =============================================================================
+# 04-first-restore / velero/restore-partial.yaml
+# 情境：應用還在，只是某個資源被誤刪（例如 Secret），只救那一個。
+# 單元 5 情境 2 實測：只還原 secrets，CreateContainerConfigError 的 Pod 自動恢復，資料完全不受影響。
+# 等價 CLI：
+#   velero restore create dr-demo-restore-secret --from-backup dr-demo-backup-01 --include-resources secrets
+# =============================================================================
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: dr-demo-restore-secret
+  namespace: velero
+spec:
+  backupName: dr-demo-backup-01
+  includedNamespaces: ["dr-demo"]
+  includedResources: ["secrets"]      # 只還原 Secret；其他已存在的資源完全不動
+  # labelSelector:                    # 也可以再用 label 縮小範圍
+  #   matchLabels:
+  #     app: postgres
+  restorePVs: false                   # 不需要碰 Volume

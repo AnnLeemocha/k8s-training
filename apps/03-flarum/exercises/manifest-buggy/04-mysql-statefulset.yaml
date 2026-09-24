@@ -1,0 +1,145 @@
+# Step 5：用 StatefulSet（而不是 Deployment）跑資料庫
+# 教學重點：
+#   - 這裡把 mysql 併進 flarum 這個 namespace，而不是獨立一個產品——
+#     跟 planka 把 postgres 併進自己 namespace 的理由完全一樣：盤點下來
+#     mysql 從頭到尾只有 flarum 一個消費者，沒有其他 namespace 要共用，
+#     獨立成一個「共用資料庫產品」反而多一層不必要的跨 namespace
+#     NetworkPolicy。如果之後真的出現第二個消費者，才需要拆回獨立產品。
+#   - StatefulSet 提供穩定的 Pod 名稱（mysql-0）、穩定的網路身分（搭配
+#     Headless Service）、以及 volumeClaimTemplates —— 每個 Pod 各自拿到
+#     專屬的 PVC，並且 Pod 重建後會重新綁定「同一顆」PVC，這是跟
+#     Deployment 最大的不同。
+#   - replicas 只開 1：一般 MySQL 沒有內建多主複寫，多開幾個 replicas
+#     並不會變成一個資料庫叢集，只會變成好幾個各自獨立、資料不同步的
+#     MySQL，這點務必跟學員澄清。
+#   - securityContext 沒有強制 runAsNonRoot、也沒有 drop capabilities：
+#     官方 mysql image 的 entrypoint 以 root 啟動 mysqld 後，會呼叫
+#     setuid()/setgid() 把行程權限降級成內部的 mysql（uid/gid 999）
+#     使用者，這個降級動作本身就需要 CAP_SETUID/CAP_SETGID；如果把
+#     capabilities 全部 drop 掉，mysqld 會直接啟動失敗（實測過：
+#     `setgid: Operation not permitted`）。這是「資料庫類 image 的安全
+#     強化，往往要跟著官方 image 的設計走，不能每個產品都套用同一套
+#     hardening」的實務案例。
+#   - livenessProbe 的 initialDelaySeconds 刻意拉高到 60（實測踩到的坑）：
+#     mysql 官方 image 第一次啟動（initdb + 建立 root/appuser 密碼與權限）
+#     在這座叢集上實測要跑到 90 幾秒才會真正 ready，如果 initialDelaySeconds
+#     設太短（例如 30），livenessProbe 會在 initdb 中途就判定容器沒活著、
+#     直接把容器殺掉重啟——結果是 root/appuser 的密碼與授權設定只做到一半
+#     就中斷，之後不管密碼打對打錯都連不進去（`Host 'x.x.x.x' is not
+#     allowed to connect`），只能刪掉 PVC 重來。跟 readinessProbe 不同，
+#     livenessProbe 失敗是「直接砍容器」，第一次啟動類的初始化流程一定要
+#     抓夠寬鬆的 initialDelaySeconds，不能照抄一般應用程式的節奏。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: flarum
+spec:
+  # 要搭配哪個 Headless Service（03-mysql-service.yaml）才能讓每個 Pod
+  # 拿到形如 mysql-0.mysql.flarum.svc.cluster.local 的穩定 DNS 名稱；
+  # 這個名稱必須跟該 Headless Service 的 metadata.name 一致。
+  serviceName: mysql
+  # 見上方教學重點：MySQL 沒有內建多主複寫，這裡不能靠調高 replicas
+  # 來擴充，只能維持 1。
+  replicas: 1
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0.40
+          # 一次性把 02-mysql-secret.yaml 整份 Secret 的所有 key 匯入成
+          # 同名環境變數（MYSQL_ROOT_PASSWORD/MYSQL_DATABASE/MYSQL_USER/
+          # MYSQL_PASSWORD），image 的 entrypoint 認得這些變數名稱，
+          # 只在資料目錄是空的（第一次啟動）時才會拿來做 initdb 初始化。
+          envFrom:
+            - secretRef:
+                name: mysql-secret
+          ports:
+            # 純宣告用途，方便下面用名稱 mysql 被 probe/Service 引用。
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+          resources:
+            # requests：排程器保證一定拿得到的資源量。
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            # limits：實際執行時的封頂值；這組數字比 flarum 應用容器高，
+            # 也是 01 號檔案 LimitRange.max 要跟著調高的原因。
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # readinessProbe：實際跑一次 mysqladmin ping 檢查 mysqld 是否
+          # 真的能接受連線（而不是只看 port 通不通），失敗只會把 Pod
+          # 從 Service 的 Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+            # 容器啟動後等 20 秒才開始第一次探測。
+            initialDelaySeconds: 20
+            # 之後每 10 秒探測一次。
+            periodSeconds: 10
+            # 單次探測超過 5 秒沒回應就視為失敗。
+            timeoutSeconds: 5
+            # 連續失敗 3 次，才標記為 NotReady。
+            failureThreshold: 3
+          # livenessProbe：只用 tcpSocket（port 通不通）判斷活著沒，
+          # 比 readinessProbe 的實際登入探測更寬鬆——因為失敗的代價是
+          # 直接砍容器，探測方式要挑不容易誤判的。
+          livenessProbe:
+            tcpSocket:
+              port: mysql
+            # 這裡的 60 秒就是上方教學重點提到、實測踩坑調出來的值，
+            # 理由請見檔案最上面的說明，這裡不重複。
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 3
+            # 容忍 4 次失敗（比一般應用的 3 次再寬鬆一點）才重啟容器，
+            # 進一步降低誤殺正在初始化的 mysqld 的機率。
+            failureThreshold: 4
+          securityContext:
+            # 禁止容器內程序透過 setuid 之類手法再拿到更高權限；
+            # 這一條跟「不 drop capabilities」不衝突，setuid()/setgid()
+            # 是 entrypoint 主動降權用掉既有的 CAP_SETUID/CAP_SETGID，
+            # 不是靠 allowPrivilegeEscalation 去提權。
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            # 掛到 mysql 官方 image 預設的資料目錄；這個路徑底下的內容
+            # 由下面 volumeClaimTemplates 產生的 PVC 提供，容器重建後
+            # 資料不會遺失。
+            - name: data
+              mountPath: /var/lib/mysql
+      securityContext:
+        # Pod 層級：掛進來的 Volume 會被強制改成這個 group 擁有
+        # （999 是 mysql image 內建的 mysql 使用者 gid），讓 mysqld
+        # 降權後的非 root 身分也能讀寫 /var/lib/mysql。
+        fsGroup: 999
+  volumeClaimTemplates:
+    # StatefulSet 特有欄位：跟 Deployment 用同一顆共用 PVC 不同，這裡是
+    # 「範本」，StatefulSet 會依此幫每個 Pod（這裡只有 mysql-0）各自建立
+    # 一顆專屬 PVC（例如 data-mysql-0），Pod 重建後仍會綁回同一顆，
+    # 資料才不會因為 Pod 被砍掉重建而消失。
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce：同時間只能被一個節點掛載——replicas 本來就只有
+        # 1，這裡不需要 RWX，也符合一般 block storage 的限制。
+        accessModes:
+          - ReadWriteOnce
+        # 使用哪個 StorageClass 提供實際的儲存空間；rook-ceph-block 是
+        # 這座叢集的 block storage（對照 flarum-assets 用的 rook-cephfs
+        # 檔案系統儲存）。
+        storageClassName: rook-ceph-block
+        resources:
+          requests:
+            storage: 5Gi

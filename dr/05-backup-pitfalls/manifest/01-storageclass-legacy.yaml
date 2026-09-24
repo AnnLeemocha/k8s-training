@@ -1,0 +1,36 @@
+# =============================================================================
+# 05-backup-pitfalls / 01-storageclass-legacy.yaml
+# 情境 4「StorageClass 不存在」專用：一個「舊叢集才有」的 StorageClass。
+#
+# 真實世界的樣子：舊叢集用 `ceph-block-ssd`，新叢集改名叫 `rook-ceph-block`，
+# Velero 備份裡的 PVC 還寫著舊名字 → 還原到新叢集時 PVC 永遠 Pending。
+# 這裡用「先建立 → 備份 → 刪掉 → 還原」的方式在同一座叢集重現。
+#
+# 內容就是 rook-ceph-block 的複製品（同一個 Ceph pool），只有名字不同，
+# 所以建立/刪除它不會影響任何既有的 PVC（已 Bound 的 PV 不依賴 SC 物件存在）。
+# =============================================================================
+apiVersion: storage.k8s.io/v1              # StorageClass 屬於 storage.k8s.io 群組
+kind: StorageClass                          # cluster-scoped 資源：沒有 namespace 欄位
+metadata:
+  name: rook-ceph-block-legacy              # 故意取一個「新叢集不會有」的名字
+  labels:
+    training/product: dr-pitfall            # 標記是練習用，方便事後清理
+provisioner: rook-ceph.rbd.csi.ceph.com     # 跟 rook-ceph-block 同一個 CSI driver（Ceph RBD）
+parameters:
+  clusterID: rook-ceph                      # Rook 管理的 Ceph 叢集 ID
+  pool: replicapool                         # RBD image 建在哪個 Ceph pool
+  imageFormat: "2"                          # RBD image 格式；2 才支援 layering/snapshot
+  imageFeatures: layering                   # 啟用 layering，CSI snapshot/clone 需要它
+  csi.storage.k8s.io/fstype: ext4           # 格式化成 ext4 後掛進 Pod
+  # 以下是 CSI 各階段要用的 Ceph 認證 Secret（Rook 安裝時自動建立在 rook-ceph namespace）
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+  csi.storage.k8s.io/controller-publish-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-publish-secret-namespace: rook-ceph
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+reclaimPolicy: Delete                       # PVC 被刪時連同 Ceph 上的 RBD image 一起刪
+allowVolumeExpansion: true                  # 允許事後放大 PVC
+volumeBindingMode: Immediate                # PVC 一建立就馬上佈建，不等 Pod 排程

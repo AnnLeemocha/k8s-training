@@ -1,0 +1,61 @@
+# =============================================================================
+# 05-backup-pitfalls / 04-legacy-volume.yaml
+# 情境 4 專用：一個用「舊 StorageClass」的 PVC + 寫入測試檔的 Deployment。
+# 必須先 apply 01-storageclass-legacy.yaml。
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: legacy-data
+  namespace: dr-pitfall
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: rook-ceph-block-legacy   # 備份檔裡會記住這個名字，還原時目標叢集必須有它
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-writer
+  namespace: dr-pitfall
+  labels:
+    app: legacy-writer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate             # RWO 磁碟，避免新舊 Pod 同時掛載
+  selector:
+    matchLabels:
+      app: legacy-writer
+  template:
+    metadata:
+      labels:
+        app: legacy-writer
+    spec:
+      containers:
+        - name: writer
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              # 檔案不存在才寫（還原後資料若有回來，就不會被覆蓋，方便驗證）
+              [ -f /data/legacy.txt ] || echo "LEGACY-DATA-001 written at $(date)" > /data/legacy.txt
+              cat /data/legacy.txt
+              sleep 360000
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: legacy-data

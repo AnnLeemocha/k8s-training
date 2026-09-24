@@ -1,0 +1,671 @@
+# planka — 完整合併版 manifest（單檔一次套用）
+#
+# 教學拆解版在 manifest/ 目錄（00~10 依序 apply，適合逐步講解）；
+# 這份是給「已經教完拆解版、要快速重建環境」或「demo 用」的合併版，
+# 內容與 manifest/ 目錄逐檔內容完全一致。
+#
+# 前置條件：先套用共用的 ../shared-infra/00-dev-gateway.yaml
+# （這個產品自帶專屬的 PostgreSQL，不依賴其他產品的資料庫）
+#
+# 用法：
+#   kubectl apply -f planka-all-in-one.yaml
+# 清除：
+#   kubectl delete namespace planka
+
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：這裡採「一個產品自帶專屬資料庫」的架構——PostgreSQL 跟
+# Planka 應用程式放在同一個 namespace 裡，只服務這一個產品（flarum 併入
+# mysql 之後也是同一種架構）。如果之後真的出現第二個消費者要共用同一顆
+# 資料庫，才需要考慮拆成獨立的共用資料庫產品；盤點下來只有單一消費者時，
+# 直接跟應用放在同一個 namespace 反而更單純、少一層跨 namespace 的
+# NetworkPolicy。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: planka
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: planka
+---
+# Step 2：資源配額與預設值
+# 這個 namespace 同時裝了 PostgreSQL 跟 Planka 本體，配額要涵蓋兩者。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: planka-quota
+  namespace: planka
+spec:
+  hard:
+    # requests.* 是「整個 namespace 承諾要保留給它的資源總和上限」——
+    # 排程器會用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "1"
+    requests.memory: 1.5Gi
+    # limits.* 是「整個 namespace 所有容器最多能吃到的資源總和上限」，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "2"
+    limits.memory: 3Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod（postgres 1 個 + planka
+    # 應用若干個，這裡留了一些餘裕給滾動更新時多出來的 Pod）。
+    pods: "6"
+    # postgres 的 volumeClaimTemplates 跟 planka 的上傳資料 PVC 都算在內，
+    # 避免忘記設定而不小心建立過多 PVC 把儲存空間吃光。
+    persistentvolumeclaims: "6"
+    # 所有 PVC 的 storage request 總和上限，要涵蓋 postgres 的資料卷
+    # 跟 planka 上傳檔案的資料卷。
+    requests.storage: 20Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: planka-limitrange
+  namespace: planka
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 250m
+        memory: 512Mi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）。
+      max:
+        cpu: "1"
+        memory: 1Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 50m
+        memory: 128Mi
+---
+# Step 3：PostgreSQL 的密碼
+# 教學重點同 mysql：Secret 只是 base64，不是加密，僅供教學使用。
+# 密碼故意不含特殊符號：Planka 應用程式是用單一組合好的
+# DATABASE_URL（postgresql://user:pass@host/db）連線，密碼裡如果有
+# 「@」「:」「/」這類 URI 保留字元，就得自己做 URL-encode，
+# 教學範例故意避開這個複雜度。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: planka
+# Opaque：一般用途的鍵值對 Secret（對照 kubernetes.io/tls、
+# kubernetes.io/dockerconfigjson 等有特定格式限制的內建型別）。
+type: Opaque
+# stringData 是明文寫法，K8s 會在建立時自動幫你 base64 編碼存進 data 欄位；
+# 之後用 `kubectl get secret -o yaml` 看到的會是 base64（不是加密，只是編碼）。
+stringData:
+  # 官方 postgres image 的 entrypoint 認得的環境變數，會拿來初始化
+  # 這三個值：建立這個角色、密碼，並建立/切換到這個資料庫。
+  POSTGRES_USER: "planka"
+  POSTGRES_PASSWORD: "TrainingPlanka123"
+  POSTGRES_DB: "planka"
+---
+# Step 4：PostgreSQL 的 Headless Service（搭配 StatefulSet）
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: planka
+  labels:
+    app: postgres
+spec:
+  # clusterIP: None 是「Headless Service」的關鍵設定：不配發虛擬 IP，
+  # 而是直接回傳背後 Pod 的 IP（搭配 StatefulSet 才有穩定的 DNS 紀錄，
+  # 例如 postgres-0.postgres.planka.svc.cluster.local）。對照一般
+  # Service，這裡的目的是「連到特定那顆 Pod」而不是「連到隨便一個」。
+  clusterIP: None
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      # Service 自己曝露的 port。
+      port: 5432
+      # 實際轉送到 Pod 的哪個 port；用名稱對應 StatefulSet 裡
+      # containerPort 宣告的 name，不用寫死數字 5432。
+      targetPort: postgres
+---
+# Step 5：PostgreSQL StatefulSet
+# 教學重點：
+#   - 跟 mysql 產品同樣的教訓——官方 postgres image 的 entrypoint 也是
+#     先以 root 啟動、chown 資料目錄給內部的 postgres 使用者後再降權
+#     執行，所以一樣不 drop capabilities。
+#   - PGDATA 特別指到子目錄（/var/lib/postgresql/data/pgdata），而不是
+#     直接用掛載點根目錄：這是官方 image 文件建議的標準做法，因為
+#     Ceph RBD 格式化成 ext4 後，掛載點根目錄一開始就會有一個
+#     lost+found 資料夾，postgres 的 initdb 一看到資料目錄「不是空的」
+#     就會直接拒絕啟動；指到子目錄就能避開這個問題。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: planka
+spec:
+  # 搭配 03-postgres-service.yaml 的 Headless Service 名稱，StatefulSet
+  # 才會幫每個 Pod 建立可預期的 DNS 紀錄（postgres-0.postgres...）。
+  serviceName: postgres
+  # 只開 1：一般 PostgreSQL 沒有內建多主複寫，多開幾個 replicas並不會
+  # 變成資料庫叢集，只會變成好幾個各自獨立、資料不同步的 postgres。
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # k8s01~03 這座訓練叢集是跟其他團隊共用的實體節點，記憶體長期
+      # 吃緊（曾量到 100%+），gpu01 平常只有 GPU 相關工作負載會用到、
+      # 平時閒置，這裡跟 onlyoffice/peertube 一樣，把資料庫類重量級
+      # 工作負載排到 gpu01，並容忍它預留給 GPU 工作負載的 taint。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine
+          # 把 02-postgres-secret.yaml 的三個鍵一次全部注入成環境變數，
+          # 官方 postgres image 的 entrypoint 會讀 POSTGRES_USER/
+          # POSTGRES_PASSWORD/POSTGRES_DB 做首次初始化。
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            # PGDATA 指到掛載點底下的子目錄，而不是掛載點根目錄本身：
+            # Ceph RBD 格式化成 ext4 後，掛載點根目錄一開始就會有一個
+            # lost+found 資料夾，initdb 一看到資料目錄「不是空的」就會
+            # 直接拒絕啟動；指到子目錄可以避開這個問題（官方 image 文件
+            # 建議的標準做法）。
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            # 純宣告用途，方便用名稱 postgres 被下面的 probe/Service 引用。
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            # 用 postgres 官方隨附的 pg_isready 工具，比單純探測 port
+            # 更準確：port 通了不代表資料庫已經初始化/可以接受連線。
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            # 這裡只探測 TCP port 有沒有通，不像 readinessProbe 用
+            # pg_isready：livenessProbe 失敗會直接砍容器重啟，是比較
+            # 激進的處置，通常會刻意選比較寬鬆、成本低的檢查方式，
+            # 避免資料庫忙碌（例如長查詢）時被 pg_isready 誤判成掛掉、
+            # 平白重啟一個其實還活著的資料庫（一般 K8s 實務上的常見
+            # 考量，非本專案實測踩過的坑）。
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            # 官方 postgres image 的 entrypoint 一樣是先以 root 啟動、
+            # chown 資料目錄給內部的 postgres 使用者後再降權執行，這個
+            # 降級動作需要 CAP_SETUID/CAP_SETGID，所以這裡不 drop
+            # capabilities（跟 mysql 同一種資料庫類 image 的限制）。
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 999 是 postgres 官方 image 內建的 postgres 使用者 gid。
+        fsGroup: 999
+  volumeClaimTemplates:
+    # volumeClaimTemplates（而不是一般的 volumes + PVC）是 StatefulSet
+    # 特有的欄位：每個 Pod 各自拿到專屬的 PVC，並且 Pod 重建後會重新
+    # 綁定「同一顆」PVC，資料不會因為 Pod 重啟而不見。
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce：同時間只能被一個節點掛載，資料庫類單一
+        # instance 本來就只需要一個 Pod 讀寫，不需要 RWX。
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: rook-ceph-block
+        resources:
+          requests:
+            storage: 5Gi
+---
+# Step 6：Planka 應用程式本身的 Secret
+# 教學重點：
+#   - DATABASE_URL 是組合好的連線字串（postgresql://user:pass@host/db），
+#     這裡的 host 直接用 `postgres`（不需要 FQDN），因為 Planka 跟
+#     PostgreSQL 在同一個 namespace 裡——跟 flarum 併入 mysql 之後的
+#     做法一致（都是「單一消費者的資料庫」直接同 namespace 存放）。
+#   - SECRET_KEY 是拿來簽 JWT / session 用的，僅供教學使用，
+#     正式環境務必換成隨機字串（例如 `openssl rand -hex 32`）。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: planka-secret
+  namespace: planka
+type: Opaque
+stringData:
+  # host 直接寫 `postgres`（Service 名稱），不需要 FQDN，因為 planka
+  # 跟 postgres 在同一個 namespace，Service 內建的短名稱就能解析。
+  DATABASE_URL: "postgresql://planka:TrainingPlanka123@postgres:5432/planka"
+  # 拿來簽 JWT / session 用，僅供教學使用，正式環境務必換成隨機字串
+  # （例如 `openssl rand -hex 32`）。
+  SECRET_KEY: "TrainingOnlySecretKey_ChangeMeInProduction"
+  # Planka 第一次啟動時會用這組密碼建立內建的預設管理員帳號
+  # （帳號/Email 見 07-planka-deployment.yaml 的環境變數）。
+  DEFAULT_ADMIN_PASSWORD: "TrainingAdmin123!"
+---
+# Step 7：Planka 上傳檔案的持久化儲存
+# 教學重點：跟 flarum 不同，這裡不需要 initContainer——實測過，Planka
+# （Node.js/Sails 應用）在寫入前會自己用 fs-extra 之類的方式確保子目錄
+# 存在（protected/favicons、protected/user-avatars、
+# protected/background-images、private/attachments），不像 Flarum
+# 預期子目錄「本來就要存在」。同一種「資料庫類 vs 檔案類」的教學（K8s
+# 元件本身）在不同 image 的實際行為可能不同，動手實測比憑印象假設可靠。
+# 用 RWX + rook-cephfs：使用者上傳的頭像/附加檔案，未來若要多 replica
+# 一起服務，這些檔案要能被多個 Pod 同時讀寫。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: planka-data
+  namespace: planka
+spec:
+  # ReadWriteMany：多個節點/Pod 可以同時掛載讀寫（對照 postgres 用的
+  # ReadWriteOnce）。
+  accessModes:
+    - ReadWriteMany
+  # rook-cephfs 是這座叢集裡支援 RWX 的儲存類別（rook-ceph-block 只支援
+  # RWO，資料庫那份 PVC 才會用 rook-ceph-block）。
+  storageClassName: rook-cephfs
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Step 8：部署 Planka 本體
+# 教學重點：
+#   - 實測過，官方 planka image 的 Dockerfile 本來就是用非 root 的
+#     node 使用者（uid/gid 1000）執行、不需要以 root 啟動再降權，
+#     跟 mysql/postgres/flarum 那種「entrypoint 需要 root 做 chown」
+#     的模式不同，所以這裡可以放心把 capabilities 全部 drop 掉——
+#     跟前面幾個資料庫類產品「不能 drop」正好是活生生的對照組，
+#     說明「安全性強化要不要做、能不能做，要看 image 實際設計」。
+#   - strategy 用預設的 RollingUpdate（沒有另外指定 Recreate）：
+#     因為 planka-data 用的是 RWX（見 06-planka-pvc.yaml），舊/新 Pod
+#     可以同時掛同一顆 PVC，不會像 flarum/filebrowser 那樣被 RWO 卡住。
+#     這是「PVC 存取模式的選擇，會直接決定你能不能做零停機更新」的
+#     活教材。
+#   - DATABASE_URL 指到同 namespace 的 `postgres`（不需要 FQDN）——
+#     跟 flarum 併入 mysql 之後的做法一致，因為兩邊都是「單一消費者的
+#     資料庫」，直接跟應用放在同一個 namespace，不需要獨立成共用產品。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planka
+  namespace: planka
+  labels:
+    app: planka
+spec:
+  # 期望維持幾個一模一樣的 Pod（教學範例只開 1 個；planka-data 用 RWX，
+  # 若要橫向擴充成多個 replica，掛載本身不會是瓶頸）。
+  replicas: 1
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: planka
+  template:
+    metadata:
+      labels:
+        app: planka
+    spec:
+      # 跟同 namespace 的 postgres 排到同一台 gpu01，理由同前（見
+      # 04-postgres-statefulset.yaml 的說明：k8s01~03 記憶體吃緊，
+      # gpu01 平時閒置）；同一 namespace 的 app/db 排在同一台節點上，
+      # 彼此走內部網路，延遲也更低。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # 這次沒有實測到跟 flarum 一樣的撞名問題（Planka 沒有叫 PLANKA_PORT
+      # 之類的環境變數），但既然本課程的服務發現都走 DNS，這裡還是預設
+      # 關掉 Kubernetes 自動注入 Service 環境變數的機制，防患未然。
+      enableServiceLinks: false
+      containers:
+        - name: planka
+          image: ghcr.io/plankanban/planka:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # Planka 拿這個值組出完整的連結（例如附件、Email 通知裡的
+            # 連結），要跟 09-httproute.yaml 的 hostnames 一致，否則
+            # 使用者點連結會連到錯的網址。
+            - name: BASE_URL
+              value: "http://planka.nexai.org.com"
+            # 這座叢集的流量是 Gateway 終止 TLS 後，以一般 HTTP 轉送到
+            # Pod（見 09-httproute.yaml），設 true 讓 Planka 信任
+            # X-Forwarded-* 這類反向代理標頭，判斷請求原本是否為 https。
+            - name: TRUST_PROXY
+              value: "true"
+            # 直接從 05-planka-secret.yaml 取值，而不是整包 envFrom：
+            # DATABASE_URL 需要跟 planka-secret 裡組合好的連線字串完全
+            # 對應，用 secretKeyRef 明確點出取用哪個鍵，可讀性較好。
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: DATABASE_URL
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: SECRET_KEY
+            # 以下四個 DEFAULT_ADMIN_* 是 Planka 第一次啟動、資料庫還
+            # 空的時候，用來自動建立預設管理員帳號的環境變數；帳號、
+            # 姓名、使用者名稱這幾個不是機密資訊，直接明寫；密碼另外
+            # 走 Secret（見下方 DEFAULT_ADMIN_PASSWORD）。
+            - name: DEFAULT_ADMIN_EMAIL
+              value: "admin@example.com"
+            - name: DEFAULT_ADMIN_NAME
+              value: "K8s Training Admin"
+            - name: DEFAULT_ADMIN_USERNAME
+              value: "admin"
+            - name: DEFAULT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: DEFAULT_ADMIN_PASSWORD
+          ports:
+            # 純宣告用途，方便用名稱 http 被下面的 probe/Service 引用；
+            # 1337 是官方 planka image 預設監聽的 port。
+            - name: http
+              containerPort: 1337
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 150m
+              memory: 384Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          readinessProbe:
+            # readinessProbe：探測「現在能不能收流量」，失敗只會把 Pod
+            # 從 Service 的 Endpoints 移除，不會重啟容器。
+            httpGet:
+              path: /
+              port: http
+            # 容器啟動後等 20 秒才開始第一次探測，給 Sails.js 應用開機、
+            # 連上資料庫的時間。
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # failureThreshold 給到 6（比 livenessProbe 寬鬆）：第一次
+            # 啟動要跑資料庫 migration，比一般請求慢，多給幾次重試機會，
+            # 避免 migration 還沒跑完就被判定 NotReady。
+            failureThreshold: 6
+          livenessProbe:
+            # livenessProbe：探測「容器是不是還活著」，失敗會直接重啟
+            # 容器，是比 readinessProbe 更激進的處置。
+            httpGet:
+              path: /
+              port: http
+            # 比 readinessProbe 的 20 秒更晚才開始探測，避免 migration
+            # 還在跑的時候被誤判成沒活著、把 migration 中途砍掉重練。
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            # 禁止容器內程序透過 setuid 之類的手法拿到比原本更高的權限。
+            allowPrivilegeEscalation: false
+            capabilities:
+              # 實測過，官方 planka image 本來就是用非 root 的 node
+              # 使用者（uid/gid 1000）啟動，不需要以 root 身分做 chown
+              # 之類的降級動作，所以可以放心把 capabilities 全部收回
+              # （對照 postgres/mysql 那種「entrypoint 需要 root」的
+              # image，這裡是可以做到最小權限的正面案例）。
+              drop:
+                - ALL
+          volumeMounts:
+            # 對應下方 volumes 的 planka-data PVC；掛載點底下的
+            # protected/favicons、protected/user-avatars、
+            # protected/background-images、private/attachments 等子
+            # 目錄由 Planka 應用程式自己在需要時建立，不需要 initContainer
+            # 事先準備。
+            - name: data
+              mountPath: /app/data
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 1000 對應 planka image 內建 node 使用者的 gid，非 root 也能
+        # 讀寫 planka-data 這顆 PVC。
+        fsGroup: 1000
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: planka-data
+---
+# Step 9：建立 ClusterIP Service，作為 Planka Pod 的穩定進入點
+# 教學重點：Pod 會因為重啟/滾動更新而換 IP，Service 透過 label selector
+# 提供一個穩定的虛擬 IP + DNS 名稱（planka.planka.svc.cluster.local），
+# 05-planka-secret.yaml 的 DATABASE_URL 也是靠同樣的機制連到 postgres。
+apiVersion: v1
+kind: Service
+metadata:
+  name: planka
+  namespace: planka
+  labels:
+    app: planka
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute，不需要也不應該在這裡開 NodePort/LoadBalancer。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: planka
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；對應 Deployment 裡 containerPort
+      # 宣告的 name（1337），不用寫死數字。
+      targetPort: http
+---
+# Step 9：對外曝露服務
+# 教學重點：這座叢集用的是 Gateway API（Cilium Gateway Controller），
+# 不是傳統的 Ingress/Ingress-nginx。這裡掛的是教學專用的 dev-gateway
+# （見 ../../shared-infra/00-dev-gateway.yaml），上課前要先套用過那份
+# 共用資源，dev-gateway 才會存在。
+#
+# 前置條件：先套用 ../../shared-infra/00-dev-gateway.yaml
+# 注意：hostnames 要跟 07-planka-deployment.yaml 的 BASE_URL 一致，
+# 否則 Planka 組出來的連結會跟實際能連進來的網域對不上。
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: planka
+  namespace: planka
+spec:
+  # 這個 HTTPRoute 要掛到哪個/哪些 Gateway 的哪個 listener 上；
+  # 兩筆都掛代表 http 跟 https 的流量都會被導進來。
+  parentRefs:
+    - name: dev-gateway
+      namespace: default
+      sectionName: http
+    - name: dev-gateway
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手
+  # （同一個 Gateway 可以同時掛很多產品，靠 hostname 分流）。
+  hostnames:
+    - "planka.nexai.org.com"
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 08-planka-service.yaml）。
+        - name: planka
+          port: 80
+---
+# Step 10（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 教學重點：這裡示範
+# 「同一個 namespace 內部的服務隔離」——postgres 只允許同 namespace 裡
+# 貼 app=planka 標籤的 Pod 連進來，其他 Pod（就算在同一個 namespace）
+# 一樣連不到。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: planka
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」（planka 跟
+  # postgres 都算）。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-planka-from-gateway
+  namespace: planka
+spec:
+  # 只對帶 app: planka 這個 label 的 Pod 生效（應用程式本身，不含
+  # postgres）。
+  podSelector:
+    matchLabels:
+      app: planka
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 1337 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 1337
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-postgres-from-planka
+  namespace: planka
+spec:
+  # 只對帶 app: postgres 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # 這裡示範「同一個 namespace 內部的服務隔離」：來源不是
+    # namespaceSelector（整個 namespace），而是 podSelector（namespace
+    # 內特定 label 的 Pod）——只有貼 app: planka 的 Pod 才能連進來，
+    # 就算跟 postgres 同一個 namespace，其他 Pod 一樣連不到。
+    - from:
+        - podSelector:
+            matchLabels:
+              app: planka
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-postgres-from-cloudbeaver
+  namespace: planka
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # 這筆補洞是給 cloudbeaver 產品用的（另一個 namespace 的資料庫管理
+    # 工具），讓上課時可以直接連進 postgres 檢視資料表；用
+    # namespaceSelector 鎖定整個 cloudbeaver namespace，而不是像上一筆
+    # 用 podSelector 鎖定同 namespace 內的特定 Pod。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudbeaver
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: planka
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-planka-to-postgres
+  namespace: planka
+spec:
+  # 只對帶 app: planka 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: planka
+  policyTypes:
+    - Egress
+  egress:
+    # 對應 allow-ingress-to-postgres-from-planka：Ingress/Egress 是
+    # 分開管制的兩個方向，postgres 那邊放行「誰能連進來」不代表 planka
+    # 這邊自動被允許「連出去」，兩份 policy 要成對存在，DATABASE_URL
+    # 的連線才走得通。
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432

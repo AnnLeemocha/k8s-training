@@ -1,0 +1,99 @@
+# Step 6：三個「debug Pod」，各自掛一個 Step 3~5 建立的 ServiceAccount
+# 教學重點：光有 ServiceAccount/Role/RoleBinding 還是「紙上談兵」，K8s
+# 會自動把 ServiceAccount 的 token 掛進每個 Pod（預設路徑
+# /var/run/secrets/kubernetes.io/serviceaccount/token），Pod 裡的
+# kubectl 會自動讀這個 token 當作身分驗證，完全不用額外設定
+# kubeconfig——這三支 Pod 就是讓學員實際 exec 進去下指令，親眼看到
+# RBAC 允許/拒絕的真實 API 回應，而不是只憑 `kubectl auth can-i` 模擬。
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-no-permissions
+  namespace: rbac-demo
+  labels:
+    app: rbac-debug
+    training/rbac-case: no-permissions
+spec:
+  # 明確指定要用哪個 ServiceAccount；沒寫的話會用該 namespace 的
+  # default ServiceAccount（同樣沒有任何 RoleBinding，行為會一樣）。
+  serviceAccountName: no-permissions
+  # 這幾支 Pod 只用來下 kubectl 指令，不需要靠 Service 被其他 Pod
+  # 發現，關掉 Docker-links 風格的自動注入環境變數，避免不必要的雜訊
+  # （沿用本教材其他產品已踩過的 FLARUM_PORT 那類命名碰撞教訓）。
+  enableServiceLinks: false
+  containers:
+    - name: kubectl
+      image: alpine/k8s:1.31.0
+      # alpine/k8s 這個映像內建 kubectl/helm/kustomize 等工具，這裡把
+      # entrypoint 蓋掉改成純待命，讓學員自己 exec 進來手動下指令，
+      # 教學上更直觀。
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi
+      securityContext:
+        # 這支容器只是待命讓人 exec 進去下 kubectl 指令，不需要 bind
+        # 低號 port、chown 檔案或 setuid/setgid 這類需要特殊 capability
+        # 的行為，直接可以全部 drop，不會像 mysql/postgres 那類
+        # 「entrypoint 先用 root 再 setuid」的映像一樣被擋下來。
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-ns-pod-viewer
+  namespace: rbac-demo
+  labels:
+    app: rbac-debug
+    training/rbac-case: ns-pod-viewer
+spec:
+  serviceAccountName: ns-pod-viewer
+  enableServiceLinks: false
+  containers:
+    - name: kubectl
+      image: alpine/k8s:1.31.0
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-cluster-node-viewer
+  namespace: rbac-demo
+  labels:
+    app: rbac-debug
+    training/rbac-case: cluster-node-viewer
+spec:
+  serviceAccountName: cluster-node-viewer
+  enableServiceLinks: false
+  containers:
+    - name: kubectl
+      image: alpine/k8s:1.31.0
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]

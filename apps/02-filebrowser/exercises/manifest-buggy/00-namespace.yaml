@@ -1,0 +1,10 @@
+# Step 1：建立本產品專屬的 Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: filebrowser
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: filebrowser

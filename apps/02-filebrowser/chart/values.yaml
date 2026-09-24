@@ -1,0 +1,139 @@
+# filebrowser（FileBrowser Quantum）Helm Chart 預設值
+# 注意：namespace 不由這個 chart 建立，請先手動建立或套用
+# ../manifest/00-namespace.yaml，再用
+# `helm install filebrowser ./chart -n filebrowser` 安裝。
+# 本產品已從官方 filebrowser/filebrowser（2026-09-01 封存）遷移到
+# FileBrowser Quantum，說明見 ../README.md。
+#
+# 下面每個欄位都標註「哪個 template 會用到」，方便對照 templates/ 底下
+# 的檔案。這是全教材第一個「有狀態」產品：兩個 PVC 分別示範 RWX（多 Pod
+# 共享檔案）跟 RWO（單寫資料庫），單一 sqlite 副本也是「不裝 HPA」的
+# 對照組。
+
+# Deployment 的副本數（templates/deployment.yaml 的 spec.replicas）。
+# 固定為 1，且 deployment.yaml 的 strategy 用 Recreate 不用
+# RollingUpdate：sqlite 不能有多個寫入者，RWO 的 db PVC 也無法同時被
+# 兩個 Pod 掛上，所以這個產品刻意不做 HPA。
+replicaCount: 1
+
+# 容器使用的映像檔（templates/deployment.yaml）。
+image:
+  repository: gtstef/filebrowser
+  tag: "1.5.6-stable"
+  pullPolicy: IfNotPresent
+
+# 容器監聽的 port，同時是 containerPort、探測 port、NetworkPolicy 允許
+# 進來的 port，也是 configmap.yaml 裡寫進 config.yaml 的 server.port。
+containerPort: 80
+
+# FileBrowser Quantum 用 config.yaml 取代舊版的 FB_ROOT / FB_DATABASE
+# 環境變數，這裡只暴露教學上有意義、常需要調整的欄位；其餘欄位沿用
+# templates/configmap.yaml 裡寫死的官方預設值。
+# adminUsername/adminPassword 寫進 templates/configmap.yaml 產生的
+# config.yaml，是初次啟動建立的管理員帳密——預設 admin/admin，正式上課
+# 前務必提醒學員登入後立刻改密碼。
+config:
+  adminUsername: admin
+  adminPassword: admin
+
+# OnlyOffice 整合設定（寫進 templates/configmap.yaml 的 config.yaml），
+# 讓 filebrowser 內可以直接開啟/編輯 Office 文件：
+# - url：使用者瀏覽器要載入 Document Server 的位址（走 Gateway 對外網域）
+# - internalUrl：filebrowser 後端呼叫 Document Server 用的叢集內部
+#   Service DNS（<service>.<namespace>.svc.cluster.local），不走 Gateway
+# - secret：JWT 共用密鑰，必須跟 ../onlyoffice 那個產品 chart 的
+#   jwt.secret 逐字一致，否則 filebrowser 跟 Document Server 互相驗證
+#   會失敗
+# namespace：onlyoffice 所在的 namespace 名稱，同時被
+# templates/networkpolicy.yaml 拿來組 namespaceSelector，允許 Document
+# Server 主動連回這裡抓檔案/回報存檔結果。
+onlyoffice:
+  namespace: onlyoffice
+  url: "http://onlyoffice.nexai.org.com"
+  internalUrl: "http://onlyoffice.onlyoffice.svc.cluster.local"
+  secret: "TrainingOnlyofficeJwtSecret_ChangeMe"
+
+# 單一容器的資源請求/上限（templates/deployment.yaml），必須落在
+# limitRange.min ~ limitRange.max 之間，加總不能超過 resourceQuota。
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Namespace 層級總量配額（templates/resourcequota.yaml）。
+# persistentVolumeClaims/requestsStorage 要覆蓋下面 persistence 裡
+# srv + db 兩個 PVC 的數量與容量總和。
+resourceQuota:
+  enabled: true
+  requestsCpu: "500m"
+  requestsMemory: 512Mi
+  limitsCpu: "1"
+  limitsMemory: 1Gi
+  pods: "5"
+  persistentVolumeClaims: "4"
+  requestsStorage: 20Gi
+
+# Namespace 層級單一容器的地板/天花板（templates/resourcequota.yaml 裡
+# 的 LimitRange）。max 必須 ≥ resources.limits，min 必須
+# ≤ resources.requests。
+limitRange:
+  enabled: true
+  default:
+    cpu: 200m
+    memory: 256Mi
+  defaultRequest:
+    cpu: 50m
+    memory: 64Mi
+  max:
+    cpu: 500m
+    memory: 512Mi
+  min:
+    cpu: 25m
+    memory: 32Mi
+
+# 兩個 PVC（templates/pvc.yaml），教學重點是 RWX 跟 RWO 的取捨：
+# - srv：實際檔案存放區（掛到容器的 /srv），多 Pod 情境下需要能被
+#   同時掛載讀寫，所以用 rook-cephfs（CephFS，RWX）。
+# - db：filebrowser 自己的 sqlite 資料庫檔（掛到容器的 /database），
+#   sqlite 本身就不支援多寫入者，所以用 rook-ceph-block（Ceph RBD，
+#   RWO）即可，也比 CephFS 便宜。
+# 本叢集沒有 default StorageClass，storageClassName 必須明確指定。
+persistence:
+  srv:
+    storageClassName: rook-cephfs
+    accessMode: ReadWriteMany
+    size: 10Gi
+  db:
+    storageClassName: rook-ceph-block
+    accessMode: ReadWriteOnce
+    size: 1Gi
+
+# ClusterIP Service 對外曝露的 port（templates/service.yaml），轉給
+# containerPort。
+service:
+  port: 80
+
+# HTTPRoute 掛的 Gateway（templates/httproute.yaml）。dev-gateway 是這個
+# 教學課程專用的共用 Gateway（見 ../../shared-infra/00-dev-gateway.yaml），
+# sectionNames 對應要吃 HTTP 跟 HTTPS 兩個 listener。
+gateway:
+  name: dev-gateway
+  namespace: default
+  sectionNames:
+    - http
+    - https
+
+# HTTPRoute 比對 Host header 用的網域（templates/httproute.yaml）。
+hostnames:
+  - filebrowser.nexai.org.com
+
+# NetworkPolicy（templates/networkpolicy.yaml）：先 default-deny 擋掉
+# 所有進出流量，再開白名單——allow ingress 到 containerPort（給
+# Gateway 用）、allow egress DNS、allow egress 到 onlyoffice.namespace
+# 的 80 port（filebrowser 主動呼叫 Document Server 用，見上面
+# onlyoffice.internalUrl）。
+networkPolicy:
+  enabled: true

@@ -1,0 +1,29 @@
+# =============================================================================
+# 09-daily-backup-verification / velero/schedule-critical-6h.yaml
+# 關鍵應用加密頻率：每 6 小時一次、保留 7 天。
+# 「每日全量 + 關鍵應用高頻」是最常見的組合：RPO 依應用重要性分級，而不是全部一樣。
+# =============================================================================
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: critical-6h
+  namespace: velero
+spec:
+  schedule: "0 */6 * * *"             # 00:00、06:00、12:00、18:00 UTC
+  useOwnerReferencesInBackup: false
+  template:
+    includedNamespaces:
+      - dr-demo                       # 以 dr-demo 代表「RPO 要求 6 小時」的關鍵應用
+    snapshotVolumes: true
+    snapshotMoveData: true
+    storageLocation: default
+    ttl: 168h0m0s                     # 7 天 → 最多 28 份
+    hooks:
+      resources:
+        - name: flush-before-snapshot # 單元 5 情境 5 的教訓：快照前先 sync
+          includedNamespaces: ["dr-demo"]
+          pre:
+            - exec:
+                command: ["/bin/sh", "-c", "sync"]
+                onError: Continue     # sync 失敗不應讓整份備份失敗（例如 distroless 容器沒有 sh）
+                timeout: 30s

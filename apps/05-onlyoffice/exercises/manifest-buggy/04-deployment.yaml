@@ -1,0 +1,157 @@
+# Step 5：部署 ONLYOFFICE Document Server
+# 教學重點：
+#   - nodeSelector + tolerations：這座叢集記憶體最緊繃的三個節點
+#     （k8s01~03）目前實際使用率已經 81~85%，這個 image 官方建議
+#     至少 2 CPU / 4GB，硬排上去有把整個節點壓到記憶體不足、
+#     波及其他共用工作負載（Rancher/Ceph/Velero 也在同一群集）的風險。
+#     `gpu01` 目前記憶體用量最低（~24%），但它本身有
+#     `nvidia.com/gpu=true:NoSchedule` 的 taint（保留給要用 GPU 的
+#     工作負載），所以這裡明確用 nodeSelector 指定排到 gpu01，
+#     並加上對應的 toleration 讓排程器願意把這個「不需要 GPU」的
+#     Pod 排過去。這是「資源規劃要看實際叢集狀況，不能只套教科書
+#     建議值」的活教材。
+#   - securityContext 沒有做任何限制：這個 image 用 supervisor 同時管理
+#     內建的 nginx / docservice / postgres / redis / rabbitmq 好幾個
+#     系統服務，root 層級的 supervisor 需要對這些子服務做使用者切換
+#     （su postgres / su rabbitmq...），跟 mysql 的教訓一樣，
+#     不能隨便 drop capabilities。
+#   - readiness/liveness 用官方內建的 /healthcheck 端點，但因為要等
+#     內部好幾個服務都啟動完成，第一次啟動可能要 1~2 分鐘，
+#     initialDelaySeconds/failureThreshold 給得比較寬鬆。
+#   - PLUGINS_ENABLED=false（實測踩到的真坑）：預設會在背景啟動
+#     documentserver-pluginsmanager，嘗試連到 github.com 下載外掛清單。
+#     這座叢集/這個 namespace 的 NetworkPolicy 只放行 DNS + Gateway 進來
+#     的流量，沒開一般對外網際網路的 egress，實測發現這個背景行程會
+#     不斷重試連線失敗、卡在近乎吃滿 1 核 CPU 的迴圈裡（功能不受影響，
+#     但白白浪費運算資源、也讓「CPU 用量」這個觀察指標失真）。
+#     停用它，剛好也呼應「零信任網路下，這種預設會打外網的背景工作
+#     要嘛開白名單、要嘛乾脆關掉」的討論。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onlyoffice
+  namespace: onlyoffice
+  labels:
+    app: onlyoffice
+spec:
+  # 只跑 1 個 Pod：內建 Postgres/Redis/RabbitMQ 全部裝在容器內部，
+  # 沒有做多副本協調，開第二個 replica 只會得到兩份互不相通的內部
+  # 資料庫，不是「高可用」而是資料不一致，所以刻意不橫向擴展。
+  replicas: 1
+  strategy:
+    # Recreate：先砍掉舊 Pod 才建新的（對照 RollingUpdate 會新舊並存）。
+    # 這裡只能用 Recreate：PVC 是 ReadWriteOnce（同時只能一個節點掛載），
+    # 且兩個內建 Postgres/RabbitMQ 實例不能同時搶同一份資料跑，
+    # 新舊 Pod 並存會直接互相衝突。
+    type: Recreate
+  selector:
+    matchLabels:
+      app: onlyoffice
+  template:
+    metadata:
+      labels:
+        app: onlyoffice
+    spec:
+      # 指定排到哪個節點：這裡的值要對應叢集實際節點名稱
+      # （可用 `kubectl get nodes` 確認），詳細原因見檔頭說明。
+      nodeSelector:
+        kubernetes.io/hostname: gpu01
+      # 容忍 gpu01 節點上「保留給 GPU 工作負載」的 taint，讓排程器
+      # 願意把這個完全不需要 GPU 的 Pod 排過去（見檔頭說明）。
+      # operator/value/effect 必須跟節點實際的 taint 完全對應，
+      # 否則容忍不會生效、Pod 會一直卡在 Pending。
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: onlyoffice
+          # 官方「單容器全包」image：內建 nginx + docservice +
+          # postgres + redis + rabbitmq，不需另外接外部資料庫。
+          # 用 :latest 純粹是教學方便；正式環境應釘死明確版本號，
+          # 避免哪天官方推新版把行為改掉、教材對不上畫面。
+          image: onlyoffice/documentserver:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # 啟用 JWT 簽章驗證（跟 02-secret.yaml 的說明對應），
+            # 沒開的話任何知道網址的人都能呼叫轉檔/協作 API。
+            - name: JWT_ENABLED
+              value: "true"
+            # 從 Secret 讀取簽章金鑰，不直接明文寫在這裡；
+            # 值必須跟呼叫端（例如 filebrowser）用的金鑰一致。
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: onlyoffice-secret
+                  key: JWT_SECRET
+          ports:
+            # 容器內建 nginx 監聽的是 80，不是常見的 8080/443，
+            # 這裡直接沿用 image 預設值，供下面 probe/Service 引用。
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          resources:
+            # requests 抓官方建議值（2 CPU/4GB）的一半，對應
+            # 01-resourcequota-limitrange.yaml 的 defaultRequest，
+            # 決定這個 Pod 會被排到剩餘容量足夠的節點。
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            # limits 對齊官方建議的最低需求（2 CPU/4GB RAM），
+            # 這是這顆 Pod 的封頂值，也是整個 namespace quota 的上限。
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: http
+            # 內部好幾個服務（nginx/docservice/postgres/rabbitmq...）
+            # 都要陸續啟動完成，實測第一次就緒可能要 1~2 分鐘，
+            # 給比 draw.io 寬鬆很多的初始等待時間。
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            # 容忍多次探測失敗才移出 Service Endpoints，避免啟動
+            # 過程中的短暫忙碌被誤判成不健康。
+            failureThreshold: 8
+          livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: http
+            # 比 readinessProbe 的延遲更長，確保容器真的完全啟動
+            # 完成後才開始判斷「是否要重啟」，避免啟動中就被砍掉
+            # 重練、陷入重啟迴圈。
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            # 唯一掛 PVC（持久化）的路徑：使用者上傳/暫存的文件資料。
+            - name: data
+              mountPath: /var/www/onlyoffice/Data
+            # log 用 emptyDir：Pod 重建後歷史 log 會清空，教學上
+            # 可接受（見檔頭關於持久化範圍的說明）。
+            - name: log
+              mountPath: /var/log/onlyoffice
+            # lib 用 emptyDir：內建 Postgres/RabbitMQ 等的資料目錄
+            # 就在這裡，代表它們的狀態不會持久保存，重開 Pod 會
+            # 回到剛安裝好的狀態（呼應檔頭「刻意簡化」的說明）。
+            - name: lib
+              mountPath: /var/lib/onlyoffice
+      securityContext:
+        # 掛載進來的 Volume（PVC + 兩個 emptyDir）會被強制改成這個
+        # group 擁有；102 是這個 image 內部執行 Document Server 服務
+        # 的使用者/群組 GID，不對齊的話容器內程序會無法寫入這些路徑。
+        fsGroup: 102
+      volumes:
+        - name: data
+          # 對應 03-pvc.yaml 建立的 PVC，唯一持久化的資料。
+          persistentVolumeClaim:
+            claimName: onlyoffice-data
+        - name: log
+          # emptyDir：跟著 Pod 生命週期走，Pod 被刪除/重建就會清空。
+          emptyDir: {}
+        - name: lib
+          emptyDir: {}

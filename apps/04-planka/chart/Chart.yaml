@@ -1,0 +1,6 @@
+apiVersion: v2
+name: planka
+description: Planka — K8s 教育訓練用 Helm Chart（自帶 PostgreSQL、同 namespace 服務隔離示範）
+type: application
+version: 0.1.0
+appVersion: "latest"

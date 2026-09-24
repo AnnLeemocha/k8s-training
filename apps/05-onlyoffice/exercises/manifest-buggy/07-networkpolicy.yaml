@@ -1,0 +1,92 @@
+# Step 7（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 多一條 egress 規則：Document Server 要主動連回 filebrowser namespace
+# 抓檔案內容、回報存檔結果（OnlyOffice 整合是雙向的，不是只有
+# filebrowser 連 onlyoffice 單方向）。寫法同樣是用
+# `kubernetes.io/metadata.name` 比對 namespace，見
+# ../../filebrowser/manifest/07-networkpolicy.yaml 的對應規則。
+# **實測踩到的坑**：一開始只開了 filebrowser → onlyoffice 這個方向，
+# 結果編輯器打開後顯示「目前無法存取該檔案」——因為 Document Server
+# 收到瀏覽器請求後，是它自己主動回頭呼叫 filebrowser 抓檔案，這個方向
+# 沒開放就會整個卡住。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: onlyoffice
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  # 也正因為預設全擋，才會踩到下面 PLUGINS_ENABLED 連不出外網的坑
+  # （見 04-deployment.yaml 檔頭說明）。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-gateway
+  namespace: onlyoffice
+spec:
+  # 只對帶 app: onlyoffice 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: onlyoffice
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 80 這個 port（容器內建 nginx 的監聽埠）。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: onlyoffice
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-onlyoffice-to-filebrowser
+  namespace: onlyoffice
+spec:
+  podSelector:
+    matchLabels:
+      app: onlyoffice
+  policyTypes:
+    - Egress
+  egress:
+    # 只放行到 filebrowser 這個 namespace 的流量，用
+    # kubernetes.io/metadata.name 這個內建 label（值等於 namespace
+    # 名稱）精準比對，而不是空的 namespaceSelector（會放行到任何地方）。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: filebrowser
+      ports:
+        # filebrowser Service 對外曝露的 port（見
+        # ../../filebrowser/manifest/05-service.yaml 一類的定義），
+        # Document Server 主動回連抓檔案內容走的就是這個 port。
+        - protocol: TCP
+          port: 80

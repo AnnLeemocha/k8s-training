@@ -1,0 +1,22 @@
+# Step 5：ClusterIP Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudbeaver
+  namespace: cloudbeaver
+  labels:
+    app: cloudbeaver
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute，不需要也不應該在這裡開 NodePort/LoadBalancer。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: cloudbeaver
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；用名稱 http 對應 Deployment
+      # 裡 containerPort 宣告的 name，不用寫死數字 8978。
+      targetPort: http

@@ -1,0 +1,22 @@
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：這是課程第一個「不屬於任何單一應用、專門拿來管理其他產品
+# 資料庫」的工具型產品。掃過目前所有產品的 *-all-in-one.yaml 之後，
+# 真正跑著一個「可以用一般 SQL client 連進去」的網路資料庫的，只有三個：
+#   - flarum 併在自己 namespace 裡的 mysql（3306）
+#   - planka 併在自己 namespace 裡的 postgres（5432）
+#   - peertube 專屬的 postgres（5432）
+# filebrowser 用的是 sqlite（單一檔案、沒有對外的網路埠，不適合用這種
+# client 連線）、onlyoffice 把 postgres/redis/rabbitmq 全部包在自己
+# image 內部、沒有獨立曝露出 Service，所以這兩個不列入串接範圍。
+# peertube 的 redis 是 key-value store，不是 CloudBeaver 這類 SQL 用戶端
+# 主要照顧的對象，這裡先不接（如果之後想管理 redis，建議另外找專門的
+# redis GUI 工具，而不是勉強塞進同一個介面）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __FILL_ME_1__
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: __FILL_ME_2__

@@ -1,0 +1,16 @@
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：mysql 併在這個產品裡（見 02~04 號檔案），而不是像最早的設計
+# 那樣獨立成一個共用的 mysql 產品——因為實際盤點下來，mysql 從頭到尾只有
+# flarum 一個消費者，比照 planka 把 postgres 併進自己 namespace 的做法，
+# 「單一消費者的資料庫」直接跟著應用一起放，不需要額外一層跨 namespace
+# 的零信任 NetworkPolicy。因此這裡不再需要 `training/mysql-client=true`
+# 這種「跨 namespace 白名單」標籤。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __FILL_ME_1__
+  labels:
+    # 純標記用途，方便用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: __FILL_ME_2__

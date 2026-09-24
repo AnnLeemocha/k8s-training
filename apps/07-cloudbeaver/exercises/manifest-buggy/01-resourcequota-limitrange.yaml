@@ -1,0 +1,54 @@
+# Step 2：資源配額與預設值
+# 教學重點：CloudBeaver 是 Java（GlassFish/Jetty）應用，起始記憶體需求
+# 比前面 PHP/Node 類的產品高一截，這裡先給比較寬鬆的數字，實際部署後
+# 再用 `kubectl top pod` 校正。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: cloudbeaver-quota
+  namespace: cloudbeaver
+spec:
+  hard:
+    # requests.* 是整個 namespace 承諾保留給它的資源總和上限，
+    # 排程器用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "100m"
+    requests.memory: 1Gi
+    # limits.* 是整個 namespace 所有容器實際執行時能吃到的資源總和封頂值，
+    # 超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    # 這裡只有一個 Deployment（1 replica），但仍留一點餘裕給
+    # 之後可能的除錯用臨時 Pod（如 kubectl run 起的暫時性容器）。
+    pods: "3"
+    # 這個 namespace 最多能建立幾個 PVC（這裡只用到 1 個 workspace PVC，
+    # 留 2 個上限方便之後擴充，例如額外掛一個備份用的 PVC）。
+    persistentvolumeclaims: "2"
+    # 這個 namespace 底下所有 PVC 加總能申請的儲存空間上限。
+    requests.storage: 10Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: cloudbeaver-limitrange
+  namespace: cloudbeaver
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 500m
+        memory: 1Gi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 250m
+        memory: 512Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）。
+      max:
+        cpu: "2"
+        memory: 2Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 100m
+        memory: 256Mi

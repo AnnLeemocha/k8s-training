@@ -1,0 +1,19 @@
+# =============================================================================
+# dr-demo / 01-postgres-pvc.yaml
+# PostgreSQL 的資料磁碟：Ceph RBD（區塊儲存）。
+# 備份重點：這塊磁碟裡的「資料」不在 etcd 裡，etcd 只存這個 PVC 物件的「描述」。
+# Velero 要救回資料，必須額外做 Volume 備份（本叢集用 CSI Snapshot + Data Mover）。
+# =============================================================================
+apiVersion: v1                          # PVC 屬於 core API group
+kind: PersistentVolumeClaim             # 向 StorageClass「申請」一塊磁碟
+metadata:
+  name: postgres-data                   # Deployment 用這個名字掛載
+  namespace: dr-demo
+spec:
+  accessModes:
+    - ReadWriteOnce                     # RWO：同一時間只能被一個節點掛載讀寫，資料庫就該單一寫入者
+  storageClassName: rook-ceph-block     # 叢集沒有 default SC，一定要明確指定；
+                                        # 還原到別的叢集時，目標叢集也必須有同名 SC（見 05-backup-pitfalls 情境 4）
+  resources:
+    requests:
+      storage: 10Gi                     # 申請容量；Velero Data Mover 只搬「實際用到」的資料，不是 10Gi 全搬

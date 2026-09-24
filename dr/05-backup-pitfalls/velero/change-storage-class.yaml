@@ -1,0 +1,21 @@
+# =============================================================================
+# 05-backup-pitfalls / velero/change-storage-class.yaml
+# 情境 4 的解法：告訴 Velero「還原時把 StorageClass A 換成 B」。
+#
+# 這是 Velero 內建 RestoreItemAction plugin 讀取的設定 ConfigMap：
+#   - 必須建立在 Velero 所在的 namespace（這座叢集是 velero）
+#   - 靠 label 被 plugin 找到，名字本身不重要
+#   - 對「之後所有的 Restore」都生效 → 屬於全域設定，用完建議刪掉或納入版控管理
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: change-storage-class-config
+  namespace: velero                              # 一定要在 Velero server 所在的 namespace
+  labels:
+    velero.io/plugin-config: ""                  # 標示這是 Velero plugin 的設定檔
+    velero.io/change-storage-class: RestoreItemAction   # 指定給 change-storage-class 這個 plugin 使用
+data:
+  # 格式：<備份裡的舊 StorageClass 名稱>: <目標叢集上的新 StorageClass 名稱>
+  # PVC 與 PV 的 storageClassName 都會被改寫。
+  rook-ceph-block-legacy: rook-ceph-block

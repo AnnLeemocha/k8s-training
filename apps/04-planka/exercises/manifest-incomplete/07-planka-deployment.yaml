@@ -1,0 +1,151 @@
+# Step 8：部署 Planka 本體
+# 教學重點：
+#   - 實測過，官方 planka image 的 Dockerfile 本來就是用非 root 的
+#     node 使用者（uid/gid 1000）執行、不需要以 root 啟動再降權，
+#     跟 mysql/postgres/flarum 那種「entrypoint 需要 root 做 chown」
+#     的模式不同，所以這裡可以放心把 capabilities 全部 drop 掉——
+#     跟前面幾個資料庫類產品「不能 drop」正好是活生生的對照組，
+#     說明「安全性強化要不要做、能不能做，要看 image 實際設計」。
+#   - strategy 用預設的 RollingUpdate（沒有另外指定 Recreate）：
+#     因為 planka-data 用的是 RWX（見 06-planka-pvc.yaml），舊/新 Pod
+#     可以同時掛同一顆 PVC，不會像 flarum/filebrowser 那樣被 RWO 卡住。
+#     這是「PVC 存取模式的選擇，會直接決定你能不能做零停機更新」的
+#     活教材。
+#   - DATABASE_URL 指到同 namespace 的 `postgres`（不需要 FQDN）——
+#     跟 flarum 併入 mysql 之後的做法一致，因為兩邊都是「單一消費者的
+#     資料庫」，直接跟應用放在同一個 namespace，不需要獨立成共用產品。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planka
+  namespace: planka
+  labels:
+    app: planka
+spec:
+  # 期望維持幾個一模一樣的 Pod（教學範例只開 1 個；planka-data 用 RWX，
+  # 若要橫向擴充成多個 replica，掛載本身不會是瓶頸）。
+  replicas: 1
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: planka
+  template:
+    metadata:
+      labels:
+        app: planka
+    spec:
+      # 這次沒有實測到跟 flarum 一樣的撞名問題（Planka 沒有叫 PLANKA_PORT
+      # 之類的環境變數），但既然本課程的服務發現都走 DNS，這裡還是預設
+      # 關掉 Kubernetes 自動注入 Service 環境變數的機制，防患未然。
+      enableServiceLinks: false
+      containers:
+        - name: planka
+          image: __FILL_ME_16__
+          imagePullPolicy: IfNotPresent
+          env:
+            # Planka 拿這個值組出完整的連結（例如附件、Email 通知裡的
+            # 連結），要跟 09-httproute.yaml 的 hostnames 一致，否則
+            # 使用者點連結會連到錯的網址。
+            - name: BASE_URL
+              value: __FILL_ME_17__
+            # 這座叢集的流量是 Gateway 終止 TLS 後，以一般 HTTP 轉送到
+            # Pod（見 09-httproute.yaml），設 true 讓 Planka 信任
+            # X-Forwarded-* 這類反向代理標頭，判斷請求原本是否為 https。
+            - name: TRUST_PROXY
+              value: "true"
+            # 直接從 05-planka-secret.yaml 取值，而不是整包 envFrom：
+            # DATABASE_URL 需要跟 planka-secret 裡組合好的連線字串完全
+            # 對應，用 secretKeyRef 明確點出取用哪個鍵，可讀性較好。
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: DATABASE_URL
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: SECRET_KEY
+            # 以下四個 DEFAULT_ADMIN_* 是 Planka 第一次啟動、資料庫還
+            # 空的時候，用來自動建立預設管理員帳號的環境變數；帳號、
+            # 姓名、使用者名稱這幾個不是機密資訊，直接明寫；密碼另外
+            # 走 Secret（見下方 DEFAULT_ADMIN_PASSWORD）。
+            - name: DEFAULT_ADMIN_EMAIL
+              value: "admin@example.com"
+            - name: DEFAULT_ADMIN_NAME
+              value: "K8s Training Admin"
+            - name: DEFAULT_ADMIN_USERNAME
+              value: "admin"
+            - name: DEFAULT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: DEFAULT_ADMIN_PASSWORD
+          ports:
+            # 純宣告用途，方便用名稱 http 被下面的 probe/Service 引用；
+            # 1337 是官方 planka image 預設監聽的 port。
+            - name: http
+              containerPort: __FILL_ME_18__
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 150m
+              memory: 384Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          readinessProbe:
+            # readinessProbe：探測「現在能不能收流量」，失敗只會把 Pod
+            # 從 Service 的 Endpoints 移除，不會重啟容器。
+            httpGet:
+              path: /
+              port: __FILL_ME_19__
+            # 容器啟動後等 20 秒才開始第一次探測，給 Sails.js 應用開機、
+            # 連上資料庫的時間。
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # failureThreshold 給到 6（比 livenessProbe 寬鬆）：第一次
+            # 啟動要跑資料庫 migration，比一般請求慢，多給幾次重試機會，
+            # 避免 migration 還沒跑完就被判定 NotReady。
+            failureThreshold: 6
+          livenessProbe:
+            # livenessProbe：探測「容器是不是還活著」，失敗會直接重啟
+            # 容器，是比 readinessProbe 更激進的處置。
+            httpGet:
+              path: /
+              port: http
+            # 比 readinessProbe 的 20 秒更晚才開始探測，避免 migration
+            # 還在跑的時候被誤判成沒活著、把 migration 中途砍掉重練。
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            # 禁止容器內程序透過 setuid 之類的手法拿到比原本更高的權限。
+            allowPrivilegeEscalation: false
+            capabilities:
+              # 實測過，官方 planka image 本來就是用非 root 的 node
+              # 使用者（uid/gid 1000）啟動，不需要以 root 身分做 chown
+              # 之類的降級動作，所以可以放心把 capabilities 全部收回
+              # （對照 postgres/mysql 那種「entrypoint 需要 root」的
+              # image，這裡是可以做到最小權限的正面案例）。
+              drop:
+                - __FILL_ME_20__
+          volumeMounts:
+            # 對應下方 volumes 的 planka-data PVC；掛載點底下的
+            # protected/favicons、protected/user-avatars、
+            # protected/background-images、private/attachments 等子
+            # 目錄由 Planka 應用程式自己在需要時建立，不需要 initContainer
+            # 事先準備。
+            - name: data
+              mountPath: __FILL_ME_21__
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 1000 對應 planka image 內建 node 使用者的 gid，非 root 也能
+        # 讀寫 planka-data 這顆 PVC。
+        fsGroup: 1000
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: planka-data

@@ -1,0 +1,50 @@
+# Step 2：限制此 Namespace 可用的資源總量與單一容器預設值
+# 教學重點：
+#   - ResourceQuota：限制整個 namespace 能吃掉多少 CPU/Memory/Pod 數，
+#     避免單一團隊/專案把整個企業叢集資源耗盡（多租戶場景常見需求）。
+#   - LimitRange：當使用者忘記在 Pod 上寫 requests/limits 時，自動帶入預設值，
+#     並限制單一容器最大可申請的資源，避免「一個 Pod 要走全部節點資源」的情況。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: drawio-quota
+  namespace: drawio
+spec:
+  hard:
+    # requests.* 是「整個 namespace 承諾要保留給它的資源總和上限」——
+    # 排程器會用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "100m"
+    requests.memory: 1Gi
+    # limits.* 是「整個 namespace 所有容器最多能吃到的資源總和上限」，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod（含 Deployment/HPA 擴出來的）。
+    pods: "10"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: drawio-limitrange
+  namespace: drawio
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 250m
+        memory: 256Mi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）。
+      max:
+        cpu: "1"
+        memory: 1Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 50m
+        memory: 64Mi

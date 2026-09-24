@@ -1,0 +1,32 @@
+# Step 4：持久化儲存（刻意簡化，請看下面說明）
+# ONLYOFFICE Document Server 官方的「單容器全包」模式（我們這裡用的
+# 預設模式）內部自帶 PostgreSQL、Redis、RabbitMQ，全部寫在容器內部
+# 的 /var/lib/postgresql、/var/lib/rabbitmq 等路徑。這些路徑跟安裝的
+# 套件版本強綁定，要在 Kubernetes 上長期正確地用 PVC 持久化，需要
+# 更仔細地處理版本升級、權限等細節，這裡教學上刻意不展開，只示範
+# 「有明確文件、單純的資料路徑」——/var/www/onlyoffice/Data，其餘
+# 路徑（log、cache）用 emptyDir，重開機會重建但不影響核心功能。
+# 白話說：這個範例重開 Pod 之後，內部資料庫/訊息佇列狀態會重置
+# （回到剛安裝好的狀態），不會遺失「Document Server 裝好了」這件事，
+# 但示範文件、協作紀錄不會保留。正式環境 ONLYOFFICE 官方建議接外部
+# PostgreSQL / Redis / RabbitMQ，可以當作進階討論題目（也順便呼應
+# 這座叢集目前資源吃緊、不適合再多開三個服務的現實考量）。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: onlyoffice-data
+  namespace: onlyoffice
+spec:
+  accessModes:
+    # ReadWriteOnce：同一時間只給單一節點掛載讀寫，跟 replicas: 1
+    # 的設計相符（這個應用本來就不打算橫向擴展多個 Pod 同時寫）。
+    - ReadWriteOnce
+  # 這座叢集的區塊儲存 StorageClass（見 shared-infra），提供的是
+  # 單一節點可掛載的持久卷，符合 ReadWriteOnce 的需求。
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      # 只放 /var/www/onlyoffice/Data（使用者上傳/暫存文件），
+      # 不含容器內建 Postgres/RabbitMQ 的資料目錄（見上面說明，
+      # 那些用 emptyDir），所以 5Gi 教學用途夠用。
+      storage: 5Gi

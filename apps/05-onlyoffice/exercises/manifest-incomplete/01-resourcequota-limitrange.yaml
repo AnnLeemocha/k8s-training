@@ -1,0 +1,61 @@
+# Step 2：資源配額與預設值
+# 教學重點：這是目前課程資源需求最重的一個產品（官方建議最少
+# 2 CPU / 4GB RAM），quota 也要跟著放大，順便讓學員感受一下
+# 「不同工作負載，該給多少資源配額」不是一套數字通吃全部產品。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: onlyoffice-quota
+  namespace: onlyoffice
+spec:
+  hard:
+    # requests.* 是「整個 namespace 承諾要保留給它的資源總和上限」——
+    # 排程器會用這個數字保證有節點容量，不是實際用量。這裡刻意抓到
+    # 剛好夠 1 個 Pod 用（見下面 defaultRequest/最終 Deployment 的值）。
+    requests.cpu: __FILL_ME_3__
+    requests.memory: 3Gi
+    # limits.* 是整個 namespace 所有容器最多能吃到的資源總和上限，
+    # 留了一些餘裕給偶爾的流量尖峰（轉檔/多人協作時 CPU 會飆高）。
+    limits.cpu: "4"
+    limits.memory: 6Gi
+    # 這個產品實際只跑 1 個 replica（見 04-deployment.yaml），這裡給到 3
+    # 是留一點餘裕給偵錯用的臨時 Pod（例如 kubectl debug/exec 起的
+    # 輔助容器），避免教學時因為 quota 卡住。
+    pods: "3"
+    # 這個 namespace 最多能同時存在幾個 PVC（含未來示範多顆 PVC 用）；
+    # 目前只用到 1 顆（03-pvc.yaml），數字留一點空間方便加練習用。
+    persistentvolumeclaims: "4"
+    # 所有 PVC 的 storage request 總和上限，要 >= 03-pvc.yaml 實際申請的
+    # 5Gi，這裡抓 20Gi 是留給日後放大 Data volume 的彈性。
+    requests.storage: 20Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: onlyoffice-limitrange
+  namespace: onlyoffice
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時的預設封頂值。這裡刻意抓得比
+      # draw.io 高很多，因為 ONLYOFFICE 官方建議至少 2 CPU / 4GB，
+      # 給太低的預設值反而會誤導學員以為這產品很輕量。
+      default:
+        cpu: "2"
+        memory: 4Gi
+      # defaultRequest：容器沒寫 requests 時的預設值，直接對齊
+      # Deployment 實際寫的 requests（見 04-deployment.yaml），
+      # 就算之後有人漏寫也不會被排到資源不夠的節點。
+      defaultRequest:
+        cpu: "1"
+        memory: 2Gi
+      # max：單一容器允許申請的資源上限，等於整個 namespace quota
+      # 的 limits 上限，因為這裡本來就只打算跑 1 個 Pod。
+      max:
+        cpu: __FILL_ME_4__
+        memory: 6Gi
+      # min：單一容器允許申請的資源下限，比 draw.io 高不少，
+      # 避免有人手殘把這個吃資源的應用開得太小、啟動後直接卡死。
+      min:
+        cpu: 250m
+        memory: __FILL_ME_5__

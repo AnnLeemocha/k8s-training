@@ -1,0 +1,18 @@
+# =============================================================================
+# dr-demo / 00-namespace.yaml
+# 備份還原課程的「受害者」應用所在的 namespace。
+# 整個課程的主線就是：備份這個 namespace → 刪掉它（模擬災難）→ 用 Velero 救回來。
+# Velero 最常見的備份單位就是「namespace」，所以一個應用一個 namespace
+# 不只是隔離的好習慣，也讓備份/還原的範圍一目了然。
+# =============================================================================
+apiVersion: v1                 # Namespace 屬於 core API group，版本固定是 v1
+kind: Namespace                # 資源種類：命名空間（cluster-scoped，本身沒有 namespace 欄位）
+metadata:
+  name: dr-demo                # namespace 名稱；Velero 備份時用 --include-namespaces dr-demo 指定
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    # Velero 也能用 label 挑選要備份的東西（--selector），但 selector 是套用在
+    # 「每一個資源」上，不是只看 namespace 的 label —— 詳見 03-first-backup。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: dr-demo

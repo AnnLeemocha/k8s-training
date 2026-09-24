@@ -1,0 +1,20 @@
+# Step 4：PeerTube 官方文件要求資料庫要先啟用兩個 PostgreSQL extension
+# （pg_trgm 做模糊搜尋、unaccent 做去重音搜尋），沒有的話 PeerTube
+# 首次啟動跑 migration 會直接失敗。
+# 教學重點：官方 postgres image 有個慣例——啟動時如果資料目錄是
+# 「第一次初始化」，會自動執行 /docker-entrypoint-initdb.d/ 底下所有
+# .sql / .sh 檔。這裡用 ConfigMap 掛一支初始化 SQL 進去，
+# 不用進容器手動下指令，示範「ConfigMap 也可以拿來放初始化腳本」，
+# 跟前面用 Secret 放密碼是同一種掛載機制的不同用途。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-initdb
+  namespace: peertube
+data:
+  # 這裡的 key 名稱 init-extensions.sql，掛進 Pod 之後會變成
+  # /docker-entrypoint-initdb.d/init-extensions.sql 這個檔案，
+  # 副檔名要是 .sql/.sh，entrypoint 才認得要執行它。
+  init-extensions.sql: |
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    CREATE EXTENSION IF NOT EXISTS unaccent;

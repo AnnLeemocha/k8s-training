@@ -1,0 +1,386 @@
+# cloudbeaver — 完整合併版 manifest（單檔一次套用）
+#
+# 教學拆解版在 manifest/ 目錄（00~06 依序 apply，適合逐步講解）；
+# 這份是給「已經教完拆解版、要快速重建環境」或「demo 用」的合併版，
+# 內容與 manifest/ 目錄逐檔內容完全一致。
+#
+# 前置條件：
+#   1) 先套用共用的 ../shared-infra/00-dev-gateway.yaml
+#   2) flarum、planka、peertube 都要先部署好，而且各自的 NetworkPolicy
+#      都要包含放行 cloudbeaver namespace 連進資料庫 port 的規則
+#      （已經加進那三個產品各自的 NetworkPolicy 檔案）
+#
+# 用法：
+#   kubectl apply -f cloudbeaver-all-in-one.yaml
+# 清除：
+#   kubectl delete namespace cloudbeaver
+
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：這是課程第一個「不屬於任何單一應用、專門拿來管理其他產品
+# 資料庫」的工具型產品。掃過目前所有產品的 *-all-in-one.yaml 之後，
+# 真正跑著一個「可以用一般 SQL client 連進去」的網路資料庫的，只有三個：
+#   - flarum 併在自己 namespace 裡的 mysql（3306）
+#   - planka 併在自己 namespace 裡的 postgres（5432）
+#   - peertube 專屬的 postgres（5432）
+# filebrowser 用的是 sqlite（單一檔案、沒有對外的網路埠，不適合用這種
+# client 連線）、onlyoffice 把 postgres/redis/rabbitmq 全部包在自己
+# image 內部、沒有獨立曝露出 Service，所以這兩個不列入串接範圍。
+# peertube 的 redis 是 key-value store，不是 CloudBeaver 這類 SQL 用戶端
+# 主要照顧的對象，這裡先不接（如果之後想管理 redis，建議另外找專門的
+# redis GUI 工具，而不是勉強塞進同一個介面）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudbeaver
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: cloudbeaver
+---
+# Step 2：資源配額與預設值
+# 教學重點：CloudBeaver 是 Java（GlassFish/Jetty）應用，起始記憶體需求
+# 比前面 PHP/Node 類的產品高一截，這裡先給比較寬鬆的數字，實際部署後
+# 再用 `kubectl top pod` 校正。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: cloudbeaver-quota
+  namespace: cloudbeaver
+spec:
+  hard:
+    # requests.* 是整個 namespace 承諾保留給它的資源總和上限，
+    # 排程器用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "500m"
+    requests.memory: 1Gi
+    # limits.* 是整個 namespace 所有容器實際執行時能吃到的資源總和封頂值，
+    # 超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    # 這裡只有一個 Deployment（1 replica），但仍留一點餘裕給
+    # 之後可能的除錯用臨時 Pod（如 kubectl run 起的暫時性容器）。
+    pods: "3"
+    # 這個 namespace 最多能建立幾個 PVC（這裡只用到 1 個 workspace PVC，
+    # 留 2 個上限方便之後擴充，例如額外掛一個備份用的 PVC）。
+    persistentvolumeclaims: "2"
+    # 這個 namespace 底下所有 PVC 加總能申請的儲存空間上限。
+    requests.storage: 10Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: cloudbeaver-limitrange
+  namespace: cloudbeaver
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 500m
+        memory: 1Gi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 250m
+        memory: 512Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）。
+      max:
+        cpu: "2"
+        memory: 2Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 100m
+        memory: 256Mi
+---
+# Step 3：持久化儲存
+# 教學重點：CloudBeaver 把「使用者、權限、以及使用者自己建立的連線設定」
+# 存在 workspace 目錄（GlobalConfigurationDir）底下的內部資料庫，不是無
+# 狀態應用——不掛 PVC 的話，每次 Pod 重建都要重新設定一次管理員帳號、
+# 重新加一次所有資料庫連線。用 RWO 就夠，因為這裡只開 1 個 replica。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cloudbeaver-workspace
+  namespace: cloudbeaver
+spec:
+  accessModes:
+    # ReadWriteOnce：同一時間只給單一節點掛載讀寫，這裡只有 1 個
+    # replica，不需要 ReadWriteMany，用 RWO 也能搭配更多種 StorageClass。
+    - ReadWriteOnce
+  # 這座叢集提供的區塊儲存 StorageClass（見叢集環境設定），
+  # workspace 是單一容器讀寫的內部資料庫檔案，用區塊儲存即可。
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      # 只存管理員帳號、連線設定等中繼資料，不是實際資料庫內容，
+      # 2Gi 綽綽有餘。
+      storage: 2Gi
+---
+# Step 4：部署 CloudBeaver 本體
+# 教學重點：
+#   - CloudBeaver 是 DBeaver 官方的 Web 版本，同一個介面可以建立多組
+#     連線、支援 MySQL/PostgreSQL 等多種資料庫，用來集中查看/驗證這門課
+#     其他產品用到的資料庫內容，不需要每個資料庫各自找一套工具。
+#   - 管理員帳號**沒有**用設定檔自動建立（曾經試過用 ConfigMap 蓋掉
+#     image 內建的 conf/initial-data.conf、帶入 adminName/adminPassword
+#     想跳過網頁精靈，結果在這個版本反而觸發另一個更嚴重的 schema
+#     migration bug，容器直接開機失敗，所以放棄這條路，改回官方預設檔案）
+#     ——第一次啟動一樣要跑網頁設定精靈，細節見 README「上課前請先確認」。
+#   - readinessProbe/livenessProbe 的 initialDelaySeconds 給得比較保守：
+#     剛在 mysql 併入 flarum 時實測到「livenessProbe 太早開始檢查，會在
+#     應用程式還在初始化時就把容器砍掉」的教訓，Java 應用的冷啟動通常比
+#     PHP/Node 慢，這裡直接抓寬一點，避免重蹈覆轍。
+#   - securityContext 沒有 drop capabilities：實測過，CloudBeaver 官方
+#     entrypoint 一樣是「用 root 先 chown 掛進來的 workspace PVC，再
+#     su 降權成內部使用者」的模式，跟 mysql/postgres/redis/flarum 同一種
+#     教訓——drop 掉 capabilities 會讓 chown/su 失敗，容器直接啟動失敗
+#     （`Operation not permitted`）。這門課目前唯一能放心全部 drop
+#     capabilities 的資料庫周邊工具是 Adminer，不是 CloudBeaver。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudbeaver
+  namespace: cloudbeaver
+  labels:
+    app: cloudbeaver
+spec:
+  # 只跑 1 個 Pod：workspace PVC 是 ReadWriteOnce，且 CloudBeaver 把
+  # 使用者/連線設定存成本機檔案，多個 replica 同時讀寫同一份 workspace
+  # 會互相打架，這個工具型應用本來就沒有水平擴展的需求。
+  replicas: 1
+  strategy:
+    # Recreate：更新時先砍掉舊 Pod 才建新的（對照 RollingUpdate）。
+    # 因為 workspace PVC 是 RWO，若用 RollingUpdate 新舊 Pod 會同時
+    # 搶掛同一顆 PVC，導致新 Pod 卡在 Pending，這裡刻意選擇 Recreate
+    # 換取「單一 replica + RWO」情境下能穩定更新，代價是更新時會短暫斷線。
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cloudbeaver
+  template:
+    metadata:
+      labels:
+        app: cloudbeaver
+    spec:
+      # 關閉 K8s 自動把同 namespace 其他 Service 資訊灌進環境變數
+      # （例如 FOO_SERVICE_HOST），避免跟 CloudBeaver 自己的設定或
+      # 之後接的資料庫連線資訊搞混。
+      enableServiceLinks: false
+      containers:
+        - name: cloudbeaver
+          # 用 latest 是為了示範官方最新版；正式環境應該釘住明確版本號，
+          # 避免哪天 image 更新造成教學當下的行為跟預期不一致。
+          image: dbeaver/cloudbeaver:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8978
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            # Java 應用冷啟動比較慢，這裡比一般 PHP/Node 應用（10 秒）
+            # 給得更久一些，避免應用程式還在初始化時就被判定 NotReady。
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # 容忍多次失敗才判定 NotReady，避免初始化過程中偶發的慢回應
+            # 就被踢出 Service Endpoints。
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            # 給到 90 秒才開始第一次存活檢查，比一般應用（20~30 秒）
+            # 高出許多：這是實測踩過的坑——曾經因為給得太短，容器在
+            # JVM 還沒完全啟動時就被 livenessProbe 判定失敗並強制重啟，
+            # 導致永遠啟動不完成（不斷重啟迴圈）。
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          # 這個容器刻意沒有寫 securityContext（也就沒有 capabilities.drop:
+          # [ALL] 這種最小權限設定）：官方 entrypoint 會先用 root 權限
+          # chown workspace PVC，再降權成內部使用者執行，若在這裡加上
+          # drop ALL，chown/su 這個步驟會直接失敗、容器開機失敗
+          # （Operation not permitted）。詳見本檔最上方教學重點說明，
+          # 這是刻意的例外，不是漏寫。
+          volumeMounts:
+            # 掛到 CloudBeaver 內部設定/使用者資料的目錄
+            # （GlobalConfigurationDir），對應上一步建立的 PVC。
+            - name: workspace
+              mountPath: /opt/cloudbeaver/workspace
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: cloudbeaver-workspace
+---
+# Step 5：ClusterIP Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudbeaver
+  namespace: cloudbeaver
+  labels:
+    app: cloudbeaver
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute，不需要也不應該在這裡開 NodePort/LoadBalancer。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: cloudbeaver
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；用名稱 http 對應 Deployment
+      # 裡 containerPort 宣告的 name，不用寫死數字 8978。
+      targetPort: http
+---
+# Step 6：對外曝露服務
+# 前置條件：先套用 ../../shared-infra/00-dev-gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: cloudbeaver
+  namespace: cloudbeaver
+spec:
+  # 這個 HTTPRoute 要掛到哪個/哪些 Gateway 的哪個 listener 上；
+  # 兩筆都掛代表 http 跟 https 的流量都會被導進來。
+  parentRefs:
+    - name: dev-gateway
+      namespace: default
+      sectionName: http
+    - name: dev-gateway
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手
+  # （同一個 Gateway 可以同時掛很多產品，靠 hostname 分流）。
+  hostnames:
+    - "cloudbeaver.nexai.org.com"
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 04-service.yaml）。
+        - name: cloudbeaver
+          port: 80
+---
+# Step 7（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 教學重點：這個產品的零信任模式又跟前面不同——它是唯一一個「主動連到
+# 好幾個不同 namespace」的產品。egress 規則用 namespaceSelector 分別指到
+# flarum/planka/peertube 這三個 namespace（用叢集自動加上的
+# `kubernetes.io/metadata.name` 標籤比對，不用另外自訂標籤）。
+# 對應地，flarum/planka/peertube 各自的 NetworkPolicy 也都要各加一條
+# ingress 規則，放行「namespace 名稱是 cloudbeaver」的來源連進資料庫的
+# port——這三條規則已經加進那三個產品各自的 NetworkPolicy 檔案裡，
+# 部署這個產品前，那三個產品的 NetworkPolicy 也要重新 apply 一次。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: cloudbeaver
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-cloudbeaver-from-gateway
+  namespace: cloudbeaver
+spec:
+  # 只對帶 app: cloudbeaver 這個 label 的 Pod 生效（這裡就是應用程式本身）。
+  podSelector:
+    matchLabels:
+      app: cloudbeaver
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 8978 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 8978
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: cloudbeaver
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-cloudbeaver-to-databases
+  namespace: cloudbeaver
+spec:
+  # 只對 CloudBeaver 本身的 Pod 生效——egress 白名單只該給真正需要
+  # 連出去的容器，不要放到整個 namespace（podSelector: {}）。
+  podSelector:
+    matchLabels:
+      app: cloudbeaver
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector 用叢集自動加在每個 namespace 上的內建標籤
+    # `kubernetes.io/metadata.name` 來比對，不需要另外替 flarum/
+    # planka/peertube 這幾個 namespace 手動打標籤。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              # flarum 的 mysql 併在同一個 namespace 裡，走 3306。
+              kubernetes.io/metadata.name: flarum
+      ports:
+        - protocol: TCP
+          port: 3306
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              # planka 的 postgres 併在同一個 namespace 裡，走 5432。
+              kubernetes.io/metadata.name: planka
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              # peertube 有獨立的 postgres，也是走 5432。
+              kubernetes.io/metadata.name: peertube
+      ports:
+        - protocol: TCP
+          port: 5432

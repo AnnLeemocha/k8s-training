@@ -1,0 +1,82 @@
+# =============================================================================
+# 03-first-backup / velero/backup-examples.yaml
+# Include / Exclude / Label Selector 的對照範例（一份檔案多個 Backup，挑需要的 apply）。
+# 每一個都附上等價的 velero CLI。
+# =============================================================================
+
+# --- 範例 A：Include Namespace（多個 namespace 一起備份）---
+# velero backup create example-a --include-namespaces dr-demo,filebrowser --snapshot-move-data
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: example-a-multi-ns
+  namespace: velero
+spec:
+  includedNamespaces: ["dr-demo", "filebrowser"]
+  snapshotVolumes: true
+  snapshotMoveData: true
+  ttl: 72h0m0s                        # 練習用，3 天就好
+---
+# --- 範例 B：Exclude Namespace（全叢集，但排除系統與 Velero 自己）---
+# velero backup create example-b --exclude-namespaces kube-system,velero,rook-ceph --snapshot-move-data
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: example-b-exclude-ns
+  namespace: velero
+spec:
+  includedNamespaces: ["*"]
+  excludedNamespaces:
+    - kube-system                     # 系統元件：重建叢集時由 kubeadm 產生，不該從備份還原
+    - velero                          # Velero 自己：還原 Velero 的 CR 會造成混亂
+    - rook-ceph                       # 儲存系統：要用 Rook 自己的方式重建，不用 Velero 還原
+  snapshotVolumes: true
+  snapshotMoveData: true
+  ttl: 72h0m0s
+---
+# --- 範例 C：Include Resource（只備份設定類，不含資料）---
+# velero backup create example-c --include-namespaces dr-demo --include-resources secrets,configmaps
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: example-c-config-only
+  namespace: velero
+spec:
+  includedNamespaces: ["dr-demo"]
+  includedResources: ["secrets", "configmaps"]   # 只要這兩種；常用於「只想留一份設定快照」
+  snapshotVolumes: false              # 沒有 PVC，也不需要快照
+  ttl: 72h0m0s
+---
+# --- 範例 D：Exclude Resource（排除雜訊）---
+# velero backup create example-d --include-namespaces dr-demo --exclude-resources events,events.events.k8s.io --snapshot-move-data
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: example-d-exclude-events
+  namespace: velero
+spec:
+  includedNamespaces: ["dr-demo"]
+  excludedResources: ["events", "events.events.k8s.io"]   # Event 還原回去沒有意義
+  snapshotVolumes: true
+  snapshotMoveData: true
+  ttl: 72h0m0s
+---
+# --- 範例 E：Label Selector（只備份貼了某個 label 的資源）---
+# velero backup create example-e --include-namespaces dr-demo --selector app=postgres --snapshot-move-data
+# ⚠️ 實測結果（2026-09-23）：dr-demo 的 Deployment 只有 template 有 app=postgres、
+#    metadata.labels 是空的；Secret、Service 也沒有 label →
+#    備份只拿到 Pod / ReplicaSet，以及「被 Pod 引用而連帶加入」的 PVC / PV，
+#    Deployment、Secret、Service 全部沒有。要用 selector，所有資源都要貼一致的 label。
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: example-e-selector
+  namespace: velero
+spec:
+  includedNamespaces: ["dr-demo"]
+  labelSelector:
+    matchLabels:
+      app: postgres
+  snapshotVolumes: true
+  snapshotMoveData: true
+  ttl: 72h0m0s

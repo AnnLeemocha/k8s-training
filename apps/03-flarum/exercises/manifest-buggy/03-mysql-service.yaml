@@ -1,0 +1,27 @@
+# Step 4：mysql 的 Headless Service（clusterIP: None）
+# 教學重點：StatefulSet 搭配 Headless Service，才能拿到穩定的 DNS 名稱
+# （mysql-0.mysql.flarum.svc.cluster.local）。因為現在跟 flarum 同一個
+# namespace，flarum Deployment 直接用短名 `mysql` 就能連到，不需要像
+# 以前獨立成 mysql 產品時那樣寫完整的跨 namespace FQDN。
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: flarum
+  labels:
+    app: mysql
+spec:
+  # clusterIP: None 就是「Headless」——不配虛擬 IP，DNS 查詢這個
+  # Service 名稱時會直接回傳背後每個 Pod 各自的 IP（例如 mysql-0），
+  # 這樣 StatefulSet 的每個 Pod 才有各自穩定、可被單獨定址的網路身分，
+  # 不會像一般 ClusterIP Service 那樣把流量打散到任一個 Pod。
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+    - name: mysql
+      # Service 對外（叢集內）曝露的 port。
+      port: 3306
+      # 轉送到 Pod 的哪個 port；用名稱 mysql 對應 StatefulSet 裡
+      # containerPort 宣告的 name，不用寫死數字。
+      targetPort: mysql

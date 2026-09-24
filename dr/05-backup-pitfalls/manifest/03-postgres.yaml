@@ -1,0 +1,85 @@
+# =============================================================================
+# 05-backup-pitfalls / 03-postgres.yaml
+# 練習用 PostgreSQL：資料放 RWO ceph-block PVC，帳密讀 Secret，初始化 SQL 讀 ConfigMap。
+# 一個 Pod 同時依賴 PVC / Secret / ConfigMap 三種東西，
+# 少任何一個，還原後的症狀都不一樣 —— 這正是本單元要觀察的。
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim    # 向 StorageClass 申請一塊磁碟
+metadata:
+  name: postgres-data
+  namespace: dr-pitfall
+spec:
+  accessModes:
+    - ReadWriteOnce            # RBD 只支援單節點讀寫，資料庫本來就只該有一個寫入者
+  storageClassName: rook-ceph-block   # 叢集沒有 default SC，一定要明確指定
+  resources:
+    requests:
+      storage: 2Gi             # 練習用，給小一點
+---
+apiVersion: apps/v1
+kind: Deployment               # 單副本 DB 用 Deployment 即可；正式環境建議 StatefulSet
+metadata:
+  name: postgres
+  namespace: dr-pitfall
+  labels:
+    app: postgres
+spec:
+  replicas: 1                  # RWO 磁碟只能被一個 Pod 掛載
+  strategy:
+    type: Recreate             # 先砍舊 Pod 再起新 Pod，避免兩個 Pod 搶同一顆 RWO 磁碟
+  selector:
+    matchLabels:
+      app: postgres            # Deployment 用這個 label 找到自己管理的 Pod
+  template:
+    metadata:
+      labels:
+        app: postgres          # 必須跟 selector 一致；Service 也用它導流
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16   # 跟 dr-demo 同一個 image，節點上已有快取
+          ports:
+            - containerPort: 5432      # PostgreSQL 預設 port（僅文件用途）
+          envFrom:
+            - secretRef:
+                name: postgres-secret  # 一次把 Secret 的所有 key 變成環境變數；Secret 不存在 → CreateContainerConfigError
+          env:
+            - name: PGDATA             # 資料放在 PVC 的子目錄，避開 ext4 的 lost+found 讓 initdb 失敗
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              cpu: 50m                 # 排程保留量：叢集記憶體吃緊，練習 DB 只要很少
+              memory: 128Mi
+            limits:
+              memory: 512Mi            # 記憶體上限，超過會被 OOMKill；不設 CPU limit 避免被節流
+          readinessProbe:              # 能接受連線才算 Ready，Service 才會導流
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data      # 資料庫檔案
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d   # 初始化 SQL；ConfigMap 不存在 → Pod 卡在 ContainerCreating
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data   # 對應上方 PVC
+        - name: init-sql
+          configMap:
+            name: postgres-init-sql    # 對應 02-postgres-config.yaml 的 ConfigMap
+---
+apiVersion: v1
+kind: Service                  # 讓其他 Pod 用 postgres.dr-pitfall.svc 連到 DB
+metadata:
+  name: postgres
+  namespace: dr-pitfall
+spec:
+  selector:
+    app: postgres              # 導流到 label app=postgres 的 Pod
+  ports:
+    - port: 5432               # Service port
+      targetPort: 5432         # 容器 port

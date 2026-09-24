@@ -1,0 +1,37 @@
+# Step 7：對外曝露服務
+# 教學重點：這座叢集用的是 Gateway API（Cilium Gateway Controller），
+# 不是傳統的 Ingress/Ingress-nginx。http/https 兩個監聽器都掛，
+# https 會用叢集既有的 *.nexai.org.com 自簽憑證（瀏覽器會出現不受信任
+# 警告，屬預期行為）。
+#
+# 前置條件：先套用 ../../shared-infra/00-dev-gateway.yaml
+# !!! hostname 請依實際可用網域調整，並確認 DNS/hosts 有指向 dev-gateway 的 EXTERNAL-IP !!!
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: onlyoffice
+  namespace: onlyoffice
+spec:
+  # 這個 HTTPRoute 要掛到哪個/哪些 Gateway 的哪個 listener 上；
+  # 兩筆都掛代表 http 跟 https 的流量都會被導進來。
+  parentRefs:
+    - name: __FILL_ME_21__
+      namespace: default
+      sectionName: http
+    - name: dev-gateway
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手
+  # （同一個 Gateway 可以同時掛很多產品，靠 hostname 分流）。
+  hostnames:
+    - __FILL_ME_22__
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 05-service.yaml）。
+        - name: onlyoffice
+          port: __FILL_ME_23__

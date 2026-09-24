@@ -1,0 +1,122 @@
+# onlyoffice Helm Chart 預設值
+# 注意：namespace 不由這個 chart 建立，請先手動建立或套用
+# ../manifest/00-namespace.yaml，再用
+# `helm install onlyoffice ./chart -n onlyoffice` 安裝。
+#
+# 下面每個欄位都標註「哪個 template 會用到」。這是全教材最重的產品：
+# 用官方「bundled-everything」映像（內建 Postgres/Redis/RabbitMQ），
+# 刻意不拆外部資料庫；也是唯一需要 GPU 節點才有足夠記憶體的產品。
+
+# Document Server 容器映像檔（templates/deployment.yaml）。
+image:
+  repository: onlyoffice/documentserver
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# JWT 驗證設定，寫進 templates/secret.yaml（JWT_SECRET）跟
+# templates/deployment.yaml 的環境變數 JWT_ENABLED。secret 必須跟
+# ../filebrowser 那個產品 chart 的 onlyoffice.secret 逐字一致，否則
+# filebrowser 跟 Document Server 互相驗證 JWT 會失敗。enabled: false
+# 只建議在單純測試時關掉，正式使用一定要開。
+jwt:
+  enabled: true
+  secret: "TrainingOnlyofficeJwtSecret_ChangeMe"
+
+# 對應 templates/deployment.yaml 的環境變數 PLUGINS_ENABLED。這座叢集
+# 的 NetworkPolicy 預設 deny 所有出網流量，官方映像內建的
+# pluginsmanager 行程如果 PLUGINS_ENABLED 沒關掉，開機就會一直重試連
+# github.com 抓外掛，被擋在 NetworkPolicy 外面後在受限環境下無限重試，
+# 白白吃掉將近一整個 CPU core（已在真實叢集踩過這個坑，見
+# ../../docs/helm-chart/README.md 或 manifest 裡的同款註解）。
+pluginsEnabled: false
+
+# 容器的資源請求/上限（templates/deployment.yaml）。這個值明顯低於
+# ONLYOFFICE 官方建議的 2 CPU/4Gi 最低需求，是因為實測拿掉
+# pluginsmanager 的 CPU-loop 問題後，穩定狀態（開機時的主題/字型
+# 生成等一次性 job 跑完之後）大概只吃 400-500Mi 記憶體；官方建議值
+# 保留在 limits，requests 抓貼近實測用量。
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+
+# Namespace 層級總量配額（templates/resourcequota.yaml）。
+resourceQuota:
+  enabled: true
+  requestsCpu: "2"
+  requestsMemory: 3Gi
+  limitsCpu: "4"
+  limitsMemory: 6Gi
+  pods: "3"
+  persistentVolumeClaims: "4"
+  requestsStorage: 20Gi
+
+# Namespace 層級單一容器的地板/天花板（templates/resourcequota.yaml 裡
+# 的 LimitRange）。max 必須 ≥ resources.limits，min 必須
+# ≤ resources.requests。
+limitRange:
+  enabled: true
+  default:
+    cpu: "2"
+    memory: 4Gi
+  defaultRequest:
+    cpu: "1"
+    memory: 2Gi
+  max:
+    cpu: "4"
+    memory: 6Gi
+  min:
+    cpu: 250m
+    memory: 512Mi
+
+# 唯一持久化的 PVC（templates/pvc.yaml），只掛
+# /var/www/onlyoffice/Data；log/cache 用 emptyDir 即可（重啟遺失沒關係）。
+# 這裡刻意不持久化內建的 Postgres/Redis/RabbitMQ 資料目錄，因為那些路徑
+# 跟映像版本綁得很緊，沒有把握正確持久化，且叢集記憶體吃緊，另外跑外部
+# DB/Redis/RabbitMQ 服務被判斷超出這個教材的範圍。
+persistence:
+  storageClassName: rook-ceph-block
+  size: 5Gi
+
+# 把 Pod 釘死在 gpu01 節點（templates/deployment.yaml 的
+# nodeSelector/tolerations）。本叢集 k8s01~03 記憶體長期在
+# 81-91% 使用率，扛不住這個產品的 requests，gpu01 記憶體較空但帶有
+# nvidia.com/gpu=true:NoSchedule taint，需要對應的 toleration 才排得
+# 進去。
+nodePlacement:
+  nodeSelector:
+    kubernetes.io/hostname: gpu01
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+
+# ClusterIP Service 對外曝露的 port（templates/service.yaml）。
+service:
+  port: 80
+
+# HTTPRoute 掛的 Gateway（templates/httproute.yaml）。
+gateway:
+  name: dev-gateway
+  namespace: default
+  sectionNames:
+    - http
+    - https
+
+# HTTPRoute 比對 Host header 用的網域（templates/httproute.yaml）。
+hostnames:
+  - onlyoffice.nexai.org.com
+
+# NetworkPolicy（templates/networkpolicy.yaml）：default-deny 之後只開
+# 三個口——Gateway 進來的 80 port、DNS、以及主動連到
+# filebrowserNamespace 的 80 port（Document Server 存檔/抓檔要主動
+# callback 回 filebrowser，見 ../filebrowser 的 onlyoffice.internalUrl）。
+networkPolicy:
+  enabled: true
+  # filebrowser 整合用：Document Server 要主動連回 filebrowser 抓檔案／
+  # 回報存檔結果，這裡填 filebrowser 所在的 namespace 名稱。
+  filebrowserNamespace: filebrowser

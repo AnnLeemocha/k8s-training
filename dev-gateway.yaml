@@ -1,0 +1,44 @@
+# 共用教學基礎設施：專屬於 K8s 教育訓練用的 Gateway
+#
+# 這座叢集本來就有 admin-gateway / app-gateway（正式環境對外用），
+# 為了不讓學員操作誤觸正式服務、也方便課後一次清除，
+# 教育訓練另外建一個獨立的 dev-gateway，供所有教學產品的 HTTPRoute 掛載。
+#
+# 套用一次即可，所有產品的 HTTPRoute 都指向這裡：
+#   kubectl apply -f shared-infra/00-dev-gateway.yaml
+#
+# 注意：此叢集的 LoadBalancer IP Pool（lb-pool: 10.90.1.90-94）套用前只剩 1 個
+# 可用 IP，套用這個 Gateway 後會用光，若之後還要加其他 Gateway/LoadBalancer
+# Service 需先跟叢集管理者確認擴充 IP Pool。
+#
+# TLS 沿用 default/gateway-tls（自簽、SAN 為 *.nexai.org.com），
+# 瀏覽器打 https 會出現「不受信任」警告，教學時可藉機講解 TLS 憑證鏈驗證。
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: dev-gateway
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: k8s-training
+    app.kubernetes.io/environment: development
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: gateway-tls
+            namespace: default
+      allowedRoutes:
+        namespaces:
+          from: All

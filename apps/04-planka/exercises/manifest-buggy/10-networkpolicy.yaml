@@ -1,0 +1,135 @@
+# Step 10（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 教學重點：這裡示範
+# 「同一個 namespace 內部的服務隔離」——postgres 只允許同 namespace 裡
+# 貼 app=planka 標籤的 Pod 連進來，其他 Pod（就算在同一個 namespace）
+# 一樣連不到。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: planka
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」（planka 跟
+  # postgres 都算）。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-planka-from-gateway
+  namespace: planka
+spec:
+  # 只對帶 app: planka 這個 label 的 Pod 生效（應用程式本身，不含
+  # postgres）。
+  podSelector:
+    matchLabels:
+      app: planka
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 1337 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 1337
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-postgres-from-planka
+  namespace: planka
+spec:
+  # 只對帶 app: postgres 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # 這裡示範「同一個 namespace 內部的服務隔離」：來源不是
+    # namespaceSelector（整個 namespace），而是 podSelector（namespace
+    # 內特定 label 的 Pod）——只有貼 app: planka 的 Pod 才能連進來，
+    # 就算跟 postgres 同一個 namespace，其他 Pod 一樣連不到。
+    - from:
+        - podSelector:
+            matchLabels:
+              app: plankaapp
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-postgres-from-cloudbeaver
+  namespace: planka
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # 這筆補洞是給 cloudbeaver 產品用的（另一個 namespace 的資料庫管理
+    # 工具），讓上課時可以直接連進 postgres 檢視資料表；用
+    # namespaceSelector 鎖定整個 cloudbeaver namespace，而不是像上一筆
+    # 用 podSelector 鎖定同 namespace 內的特定 Pod。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudbeaver
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: planka
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-planka-to-postgres
+  namespace: planka
+spec:
+  # 只對帶 app: planka 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: planka
+  policyTypes:
+    - Egress
+  egress:
+    # 對應 allow-ingress-to-postgres-from-planka：Ingress/Egress 是
+    # 分開管制的兩個方向，postgres 那邊放行「誰能連進來」不代表 planka
+    # 這邊自動被允許「連出去」，兩份 policy 要成對存在，DATABASE_URL
+    # 的連線才走得通。
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432

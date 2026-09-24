@@ -1,0 +1,15 @@
+# =============================================================================
+# 05-backup-pitfalls / 00-namespace.yaml
+# 「Backup 的陷阱」單元專用的練習 namespace。
+# 刻意跟 dr-demo 分開：這個單元會故意做出「不完整的備份」再還原，
+# 不應該拿主線的 dr-demo 來實驗，避免學員搞混哪一份才是好的備份。
+# =============================================================================
+apiVersion: v1                 # Namespace 屬於 core API group，版本固定是 v1
+kind: Namespace                # 資源種類：命名空間
+metadata:
+  name: dr-pitfall             # namespace 名稱；還原時會用 namespaceMapping 映射到 dr-pitfall-xxx
+  labels:
+    # 純標記用途，方便用 `kubectl get ns -l training/product=dr-pitfall` 篩選，
+    # 對 K8s 本身沒有任何行為意義；Velero 也可以用 label 篩選要備份的 namespace。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: dr-pitfall

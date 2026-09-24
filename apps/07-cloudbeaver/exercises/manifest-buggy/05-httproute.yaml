@@ -1,0 +1,31 @@
+# Step 6：對外曝露服務
+# 前置條件：先套用 ../../shared-infra/00-dev-gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: cloudbeaver
+  namespace: cloudbeaver
+spec:
+  # 這個 HTTPRoute 要掛到哪個/哪些 Gateway 的哪個 listener 上；
+  # 兩筆都掛代表 http 跟 https 的流量都會被導進來。
+  parentRefs:
+    - name: dev-gateway
+      namespace: default
+      sectionName: http
+    - name: dev-gateway
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手
+  # （同一個 Gateway 可以同時掛很多產品，靠 hostname 分流）。
+  hostnames:
+    - "cloudbeaver.nexai.org.com"
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 04-service.yaml）。
+        - name: cloudbeaver
+          port: 80

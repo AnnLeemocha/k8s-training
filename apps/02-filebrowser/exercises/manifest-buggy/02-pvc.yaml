@@ -1,0 +1,51 @@
+# Step 3：持久化儲存（本產品跟 draw.io 最大的不同）
+# 教學重點：filebrowser 是「有狀態」應用，需要兩種不同性質的資料：
+#   1) filebrowser-srv：實際被瀏覽/上傳的檔案本體。用 RWX（rook-cephfs），
+#      示範「多個 Pod 可以同時掛同一份檔案」——即使目前只跑 1 個 replica，
+#      這個選擇也讓未來要擴充/做維運熱更新時，新舊 Pod 能同時讀寫同一份資料。
+#   2) filebrowser-db：FileBrowser Quantum 自己的 sqlite 資料庫與快取
+#      （掛在 /home/filebrowser/data，見 04-deployment.yaml）。用 RWO
+#      （rook-ceph-block），因為 sqlite 本來就不支援多個行程同時寫入，
+#      刻意跟上面的 RWX 做對比，讓學員理解「RWO vs RWX 該怎麼選」不是
+#      看應用程式種類，而是看『這份資料允不允許被多個 Pod 同時寫入』。
+#      這點從舊版 filebrowser/filebrowser 換到 Quantum 都沒有變。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: filebrowser-srv
+  namespace: filebrowser
+spec:
+  accessModes:
+    # ReadWriteMany：同一份 Volume 可以同時被多個節點上的多個 Pod
+    # 掛載讀寫。这裡選它不是因為現在有多個 replica，而是「檔案本體」
+    # 這種資料本質上允許被多方同時存取，換成 rolling update 或未來
+    # 擴充多 replica 時不需要改儲存架構。
+    - ReadWriteMany
+  # rook-cephfs：這座叢集裡支援 RWX 的儲存類別（CephFS），
+  # 對照下面 rook-ceph-block 只支援 RWO。
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      # PVC 跟儲存系統申請的容量下限，實際能否拿到看 StorageClass
+      # 後端（這裡是 rook-cephfs）是否還有剩餘容量。
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: filebrowser-db
+  namespace: filebrowser
+spec:
+  accessModes:
+    # ReadWriteOnce：同一時間只能被一個節點掛載讀寫。sqlite 本來就
+    # 不支援多個行程同時寫入同一個檔案，就算 K8s 允許多掛也沒用，
+    # 選 RWO 剛好符合這份資料實際的存取限制。
+    - ReadWriteOnce
+  # rook-ceph-block：這座叢集裡只給單一節點掛載的區塊儲存類別
+  # （Ceph RBD），比 rook-cephfs 更輕量，適合這種單一行程存取的資料。
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      # sqlite 資料庫 + 快取，教學用途資料量小，1Gi 夠用（README 有
+      # 記錄實測時出現快取空間偏小的警告，長期使用建議調大）。
+      storage: 1Gi

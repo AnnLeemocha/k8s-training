@@ -1,0 +1,88 @@
+# Step 8（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 同 draw.io 的做法，細節說明見 draw.io/manifest/06-networkpolicy.yaml。
+# 換成 FileBrowser Quantum 後多一條 egress 規則：filebrowser 要主動呼叫
+# onlyoffice namespace 的 Document Server 才能做 OnlyOffice 整合，寫法
+# 跟 cloudbeaver 連到 flarum/planka/peertube 資料庫的模式一致，見
+# ../../cloudbeaver/manifest/06-networkpolicy.yaml。onlyoffice 那邊的
+# `allow-ingress-from-gateway` 規則本來就是開放所有來源（`from: []`），
+# 不需要額外幫 onlyoffice 加規則。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: filebrowser
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-gateway
+  namespace: filebrowser
+spec:
+  # 只對帶 app: filebrowser 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: __FILL_ME_23__
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 80 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: __FILL_ME_24__
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: filebrowser
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-filebrowser-to-onlyoffice
+  namespace: filebrowser
+spec:
+  # 只有帶 app: filebrowser 這個 label 的 Pod 需要主動連出去呼叫
+  # OnlyOffice Document Server（做整合設定查詢等），其他 Pod 不受影響。
+  podSelector:
+    matchLabels:
+      app: filebrowser
+  policyTypes:
+    - Egress
+  egress:
+    # 用 namespaceSelector 比對 kubernetes.io/metadata.name（K8s 內建
+    # 幫每個 namespace 自動加上的 label），只放行連到 onlyoffice
+    # 這一個 namespace，比 namespaceSelector: {} 精準很多。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: __FILL_ME_25__
+      ports:
+        # 只開 onlyoffice 的 Service port（80），不是任意 port。
+        - protocol: TCP
+          port: 80

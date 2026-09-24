@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "filebrowser.name" . }}-srv
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "filebrowser.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.srv.accessMode }}
+  storageClassName: {{ .Values.persistence.srv.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.srv.size }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "filebrowser.name" . }}-db
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "filebrowser.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.db.accessMode }}
+  storageClassName: {{ .Values.persistence.db.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.db.size }}

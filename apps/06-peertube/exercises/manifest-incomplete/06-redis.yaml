@@ -1,0 +1,115 @@
+# Step 6：Redis（PeerTube 用來做背景工作佇列 job queue 與短期快取）
+# 教學重點：這裡故意跟 postgres 用不同的資源類型組合——
+#   - postgres：StatefulSet + PVC，因為影片/使用者資料是「不能弄丟」
+#     的資料。
+#   - redis：Deployment + emptyDir，因為這裡存的是任務佇列/快取，
+#     Pod 重建掉了頂多是背景工作要重跑，不是不可回復的資料遺失。
+#   同樣是「資料庫類」服務，該不該用 PVC、該不該用 StatefulSet，
+#   要看資料本身的重要性，不是看「這是不是資料庫」這個表面分類。
+# 沒有設密碼：僅限教學環境內部使用，靠 NetworkPolicy 做存取控制，
+# 正式環境請開 requirepass。
+# 實測踩到的坑（跟 mysql 一樣的教訓）：官方 redis image 預設雖然是用
+# 非 root 的 redis 使用者跑，但 entrypoint 仍會先以 root 對工作目錄
+# 執行一次 chown，drop 掉全部 capabilities 會讓這個 chown 失敗
+# （`chown: . : Operation not permitted`），容器直接啟動失敗。
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: peertube
+  labels:
+    app: redis
+spec:
+  # 跟 postgres 一樣用 Headless Service（DNS 直接回傳 Pod IP），
+  # 這裡雖然背後是 Deployment 不是 StatefulSet，但 replicas 固定為 1，
+  # 純粹拿來當內部服務發現用，跟一般 ClusterIP Service 的差別
+  # 在這個場景下不明顯。
+  clusterIP: None
+  selector:
+    app: __FILL_ME_21__
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: __FILL_ME_22__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: peertube
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  # Recreate：更新時先砍掉舊 Pod 再建新的（對照 RollingUpdate 會兩個
+  # Pod 並存一小段時間）。這裡資料放在 emptyDir，emptyDir 綁定的是
+  # 「這個 Pod」，新舊 Pod 同時存在也不會共用/搬移同一份資料，
+  # 用 Recreate 純粹是避免瞬間有兩個 redis 容器同時存在造成混淆，
+  # 短暫的服務中斷在教學環境可接受。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # 跟 postgres 排到同一台 gpu01，理由同 05-postgres-statefulset.yaml。
+      nodeSelector:
+        kubernetes.io/hostname: __FILL_ME_23__
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          ports:
+            # 純宣告用途，方便用名稱 redis 被上面的 Service/下面的
+            # probe 引用。
+            - name: redis
+              containerPort: __FILL_ME_24__
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          # readinessProbe：直接用 redis-cli ping 確認伺服器有回應，
+          # 失敗只會把 Pod 從 Service Endpoints 移除。
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # livenessProbe：單純 TCP 連線測試，失敗會直接重啟容器。
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            # 注意：這裡沒有 drop capabilities（見上方教學重點的實測
+            # 說明）——官方 redis image 的 entrypoint 會先以 root 對
+            # 工作目錄執行一次 chown 再切換成 redis 使用者，drop 掉
+            # capabilities 會讓這個 chown 失敗、容器啟動不了。
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        # emptyDir：資料跟著這個 Pod 的生命週期，Pod 被刪除/重新排程
+        # 到別的節點就會清空——對照 postgres 用 volumeClaimTemplates
+        # 接上 PVC，這正是上方教學重點講的「該不該用 PVC 要看資料
+        # 重不重要，不是看是不是資料庫」的具體示範。
+        - name: data
+          emptyDir: {}

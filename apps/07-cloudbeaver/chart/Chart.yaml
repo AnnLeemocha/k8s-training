@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cloudbeaver
+description: CloudBeaver — K8s 教育訓練用 Helm Chart（跨 namespace 連多個資料庫的視覺化管理介面示範）
+type: application
+version: 0.1.0
+appVersion: "latest"

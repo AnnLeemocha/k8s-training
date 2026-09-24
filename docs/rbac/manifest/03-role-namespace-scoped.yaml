@@ -1,0 +1,42 @@
+# Step 4（對照組 2：namespace 範圍的最小權限）：Role + RoleBinding
+# 教學重點：Role 是「namespace 範圍」的權限規則，只對 metadata.namespace
+# 指定的那個 namespace 生效——就算 rbac-demo 裡的 Pod 想查 drawio
+# namespace 的 Pod，一樣會被拒絕，因為 Role 從定義上就跨不出自己的
+# namespace（這點會在下面的 ClusterRole 對照組看到差異）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ns-pod-viewer
+  namespace: rbac-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-viewer
+  namespace: rbac-demo
+rules:
+  # apiGroups: "" 代表 core API group（Pod/ConfigMap/Service 這些內建資源
+  # 都屬於這一組，寫法上用空字串，不是省略不寫）。
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "configmaps"]
+    # 只給讀取權限：get（查單一物件）、list（查清單）、watch（訂閱變化），
+    # 完全沒有 create/update/patch/delete，示範「最小權限」原則——這個
+    # SA 連自己 namespace 裡的 Pod 都不能刪除或修改。
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ns-pod-viewer-binding
+  namespace: rbac-demo
+subjects:
+  # RoleBinding 把「誰」（這裡是 ServiceAccount）跟「有什麼權限」
+  # （roleRef 指到的 Role）綁在一起，兩者缺一不可：光有 Role
+  # 沒有 RoleBinding，等於權限規則寫好了但沒人拿得到。
+  - kind: ServiceAccount
+    name: ns-pod-viewer
+    namespace: rbac-demo
+roleRef:
+  kind: Role
+  name: pod-viewer
+  apiGroup: rbac.authorization.k8s.io

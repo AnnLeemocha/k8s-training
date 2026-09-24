@@ -1,0 +1,136 @@
+<mxfile host="app.diagrams.net" modified="2026-09-22T00:00:00.000Z" agent="k8s-training" version="24.7.17" type="device">
+  <diagram id="planka-arch" name="planka K8s Architecture">
+    <mxGraphModel dx="1500" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Client -->
+        <mxCell id="client" value="學員瀏覽器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="480" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- default namespace group -->
+        <mxCell id="nsDefault" value="namespace: default (shared-infra)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="260" y="440" width="220" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="gateway" value="dev-gateway&#10;(Gateway API / Cilium)&#10;http :80 + https :443" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="285" y="480" width="170" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- planka namespace group -->
+        <mxCell id="nsPlanka" value="namespace: planka" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="560" y="40" width="880" height="960" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rq" value="ResourceQuota + LimitRange&#10;(涵蓋 planka + postgres 兩個元件)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="590" y="80" width="260" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="route" value="HTTPRoute: planka&#10;host: planka.nexai.org.com" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="590" y="480" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="svcApp" value="Service: planka&#10;ClusterIP :80 -&gt; :1337" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="860" y="480" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="deployApp" value="Deployment: planka (replicas=1)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f8f8f8;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="400" width="260" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="podApp" value="Pod&#10;ghcr.io/plankanban/planka:latest&#10;非 root (uid 1000)，無 initContainer&#10;capabilities drop: ALL&#10;:1337" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="440" width="210" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="svcDb" value="Service: postgres (Headless)&#10;clusterIP: None :5432" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="860" y="700" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sts" value="StatefulSet: postgres (replicas=1)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f8f8f8;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="640" width="260" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="podDb" value="Pod&#10;postgres:16.4-alpine&#10;（entrypoint 需 root，不 drop capabilities）&#10;PGDATA=/var/lib/postgresql/data/pgdata&#10;:5432" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="680" width="210" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="pvc" value="PVC: data&#10;RWO, rook-ceph-block, 5Gi&#10;（子目錄 pgdata 避開 ext4 lost+found）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="850" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="np" value="NetworkPolicy（6 條）&#10;default-deny + Gateway ingress :1337&#10;+ podSelector-to-podSelector：app=planka -&gt; app=postgres :5432" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="590" y="880" width="500" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="client" target="gateway">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1label" value="HTTPS (Host: planka.nexai.org.com)" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e1">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="gateway" target="route">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2label" value="parentRefs" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e2">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="route" target="svcApp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3label" value="backendRefs :80" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e3">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="svcApp" target="podApp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4label" value="selector app=planka" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e4">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="podApp" target="svcDb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5label" value="DATABASE_URL=postgresql://planka:***@postgres:5432/planka" style="edgeLabel;html=1;align=center;fontSize=9;" vertex="1" connectable="0" parent="e5">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="svcDb" target="podDb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6label" value="selector app=postgres" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e6">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="podDb" target="pvc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7label" value="volumeMounts /var/lib/postgresql/data" style="edgeLabel;html=1;align=center;fontSize=9;" vertex="1" connectable="0" parent="e7">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="rq" target="deployApp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="rq" target="sts">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9label" value="限制整個 namespace 用量（app + db 加總）" style="edgeLabel;html=1;align=center;fontSize=9;" vertex="1" connectable="0" parent="e9">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="np" target="deployApp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="np" target="sts">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11label" value="只放行 Gateway ingress :1337 + app=planka -&gt; app=postgres :5432 + DNS egress :53" style="edgeLabel;html=1;align=center;fontSize=9;" vertex="1" connectable="0" parent="e11">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: drawio
+description: draw.io (diagrams.net) — K8s 教育訓練用 Helm Chart
+type: application
+version: 0.1.0
+appVersion: "24.7.17"

@@ -1,0 +1,16 @@
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：這是課程最後、最複雜的一個範例，一次整合前面學過的所有
+# 概念——StatefulSet（PostgreSQL/Redis）、Secret、PVC、initContainer
+# 的變形（ConfigMap 掛載初始化腳本）、跨元件的 NetworkPolicy、
+# 以及資源緊繃叢集的節點排程。PostgreSQL/Redis 都是 Peertube 專屬、
+# 跟這個 namespace 綁在一起（呼應 planka 的架構，而不是 mysql 的
+# 共用架構）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: peertube
+  labels:
+    # 純標記用途，方便用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: peertube

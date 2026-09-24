@@ -1,0 +1,16 @@
+# Step 1：建立本產品專屬的 Namespace
+# 教學重點：這裡採「一個產品自帶專屬資料庫」的架構——PostgreSQL 跟
+# Planka 應用程式放在同一個 namespace 裡，只服務這一個產品（flarum 併入
+# mysql 之後也是同一種架構）。如果之後真的出現第二個消費者要共用同一顆
+# 資料庫，才需要考慮拆成獨立的共用資料庫產品；盤點下來只有單一消費者時，
+# 直接跟應用放在同一個 namespace 反而更單純、少一層跨 namespace 的
+# NetworkPolicy。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __FILL_ME_1__
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: __FILL_ME_2__

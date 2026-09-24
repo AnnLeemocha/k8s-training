@@ -1,0 +1,25 @@
+# Step 7：Planka 上傳檔案的持久化儲存
+# 教學重點：跟 flarum 不同，這裡不需要 initContainer——實測過，Planka
+# （Node.js/Sails 應用）在寫入前會自己用 fs-extra 之類的方式確保子目錄
+# 存在（protected/favicons、protected/user-avatars、
+# protected/background-images、private/attachments），不像 Flarum
+# 預期子目錄「本來就要存在」。同一種「資料庫類 vs 檔案類」的教學（K8s
+# 元件本身）在不同 image 的實際行為可能不同，動手實測比憑印象假設可靠。
+# 用 RWX + rook-cephfs：使用者上傳的頭像/附加檔案，未來若要多 replica
+# 一起服務，這些檔案要能被多個 Pod 同時讀寫。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: planka-data
+  namespace: planka
+spec:
+  # ReadWriteMany：多個節點/Pod 可以同時掛載讀寫（對照 postgres 用的
+  # ReadWriteOnce）。
+  accessModes:
+    - ReadWriteMany
+  # rook-cephfs 是這座叢集裡支援 RWX 的儲存類別（rook-ceph-block 只支援
+  # RWO，資料庫那份 PVC 才會用 rook-ceph-block）。
+  storageClassName: rook-cephfs
+  resources:
+    requests:
+      storage: 5Gi

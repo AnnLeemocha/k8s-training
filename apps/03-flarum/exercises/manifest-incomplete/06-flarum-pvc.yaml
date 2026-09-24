@@ -1,0 +1,45 @@
+# Step 4：持久化儲存
+# 教學重點（重要坑，實測過才發現）：
+#   flarum 這個 image（mondedie/flarum）把整個 Flarum 程式（vendor/、
+#   composer.lock、核心程式碼）直接烘進 image 的 /flarum/app 路徑。
+#   很多 docker-compose 教學會直接把整個 /flarum/app 掛成一個 volume——
+#   這在 Docker 是可行的（Docker 對「全新的具名 volume」會自動複製
+#   image 內原本的內容進去），但在 Kubernetes 完全不是這樣：PVC 掛上去
+#   就是「蓋掉」該路徑，image 裡原本的檔案會直接消失不見，
+#   結果就是程式碼整包不見、容器起不來。
+#   所以這裡刻意只掛「資料類」的子目錄，而不是整個 /flarum/app：
+#     - flarum-storage -> /flarum/app/storage（log、cache、session 等執行期資料）
+#       用 RWO + rook-ceph-block：只有一個 replica 在寫，不需要多寫者。
+#     - flarum-assets  -> /flarum/app/public/assets（頭像、上傳的附加檔）
+#       用 RWX + rook-cephfs：模擬「未來要多 replica 一起讀寫上傳檔案」的情境，
+#       跟 filebrowser 的 RWX 選型呼應。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flarum-storage
+  namespace: flarum
+spec:
+  # ReadWriteOnce：只有 1 個 replica 在寫（見下面 07 號檔案的
+  # replicas: 1），不需要多節點同時掛載，用一般 block storage 即可。
+  accessModes:
+    - __FILL_ME_14__
+  storageClassName: __FILL_ME_15__
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flarum-assets
+  namespace: flarum
+spec:
+  # ReadWriteMany：刻意選跟上面不同的存取模式，模擬「未來要多 replica
+  # 同時讀寫上傳檔案」的情境，因此要用支援多節點同時掛載的 storageClass
+  # （rook-cephfs），跟 flarum-storage 的 rook-ceph-block 選型呼應對照。
+  accessModes:
+    - __FILL_ME_16__
+  storageClassName: __FILL_ME_17__
+  resources:
+    requests:
+      storage: 5Gi

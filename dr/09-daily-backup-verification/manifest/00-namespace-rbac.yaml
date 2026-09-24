@@ -1,0 +1,97 @@
+# =============================================================================
+# 09-daily-backup-verification / manifest/00-namespace-rbac.yaml
+# 備份檢查與還原測試用的 namespace + 最小權限 RBAC。
+#
+#   dr-ops           跑 CronJob 的地方（ServiceAccount backup-verifier）
+#   dr-restore-test  還原測試的「固定目的地」—— 事先建立，Role 只給這個 namespace，
+#                    Job 不需要叢集層級的 exec / 建立 Pod / 刪 namespace 權限。
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dr-ops
+  labels:
+    app.kubernetes.io/part-of: k8s-training
+    training/product: dr-ops
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dr-restore-test
+  labels:
+    app.kubernetes.io/part-of: k8s-training
+    training/product: dr-restore-test
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-verifier                 # 兩支 CronJob 共用的身分
+  namespace: dr-ops
+---
+# --- velero namespace：讀備份/BSL/Schedule，建立與清理 Restore ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-verifier
+  namespace: velero
+rules:
+  - apiGroups: ["velero.io"]
+    resources: ["backups", "backupstoragelocations", "schedules", "datadownloads"]
+    verbs: ["get", "list", "watch"]     # 唯讀：檢查狀態用
+  - apiGroups: ["velero.io"]
+    resources: ["restores"]
+    verbs: ["get", "list", "watch", "create", "delete"]   # 建立還原測試、清理舊紀錄
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-verifier
+  namespace: velero
+subjects:
+  - kind: ServiceAccount
+    name: backup-verifier
+    namespace: dr-ops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backup-verifier
+---
+# --- dr-restore-test namespace：驗證資料（exec、臨時 Pod）與清除還原出來的資源 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: restore-inspector
+  namespace: dr-restore-test
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "persistentvolumeclaims", "secrets", "configmaps", "serviceaccounts", "replicationcontrollers"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]                   # check-data.sh 用 kubectl exec 查資料庫
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]                      # 讀 CephFS 驗證 Pod 的輸出
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "delete"]    # `kubectl delete all` 會列到這些種類
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: restore-inspector
+  namespace: dr-restore-test
+subjects:
+  - kind: ServiceAccount
+    name: backup-verifier
+    namespace: dr-ops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: restore-inspector

@@ -1,0 +1,23 @@
+# Step 3：持久化儲存
+# 教學重點：CloudBeaver 把「使用者、權限、以及使用者自己建立的連線設定」
+# 存在 workspace 目錄（GlobalConfigurationDir）底下的內部資料庫，不是無
+# 狀態應用——不掛 PVC 的話，每次 Pod 重建都要重新設定一次管理員帳號、
+# 重新加一次所有資料庫連線。用 RWO 就夠，因為這裡只開 1 個 replica。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cloudbeaver-workspace
+  namespace: cloudbeaver
+spec:
+  accessModes:
+    # ReadWriteOnce：同一時間只給單一節點掛載讀寫，這裡只有 1 個
+    # replica，不需要 ReadWriteMany，用 RWO 也能搭配更多種 StorageClass。
+    - ReadWriteOnce
+  # 這座叢集提供的區塊儲存 StorageClass（見叢集環境設定），
+  # workspace 是單一容器讀寫的內部資料庫檔案，用區塊儲存即可。
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      # 只存管理員帳號、連線設定等中繼資料，不是實際資料庫內容，
+      # 2Gi 綽綽有餘。
+      storage: 2Gi

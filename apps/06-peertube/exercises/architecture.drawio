@@ -1,0 +1,168 @@
+<mxfile host="app.diagrams.net" modified="2026-09-22T00:00:00.000Z" agent="k8s-training" version="24.7.17" type="device">
+  <diagram id="peertube-arch" name="PeerTube K8s Architecture">
+    <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1300" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Client -->
+        <mxCell id="client" value="學員瀏覽器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="560" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- default namespace group -->
+        <mxCell id="nsDefault" value="namespace: default (shared-infra)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="260" y="520" width="220" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="gateway" value="dev-gateway&#10;(Gateway API / Cilium)&#10;https :443 only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="285" y="560" width="170" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- peertube namespace group -->
+        <mxCell id="nsPeertube" value="namespace: peertube" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="560" y="40" width="1080" height="1180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rq" value="ResourceQuota + LimitRange&#10;(3 個元件共用一份 namespace 資源治理)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="590" y="80" width="280" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="route" value="HTTPRoute: peertube&#10;host: peertube.nexai.org.com&#10;(僅掛 https 監聽器)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="590" y="560" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- NetworkPolicy boundary (drawn as big dashed red box behind the 3 components) -->
+        <mxCell id="npBoundary" value="NetworkPolicy 邊界（default-deny-all + 7 條放行規則）" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;fillColor=#f8cecc;strokeColor=#b85450;dashed=1;fontStyle=1;opacity=40;" vertex="1" parent="1">
+          <mxGeometry x="860" y="80" width="760" height="1100" as="geometry" />
+        </mxCell>
+
+        <!-- PeerTube app component -->
+        <mxCell id="svcPeertube" value="Service: peertube&#10;ClusterIP :80 -&gt; :9000" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="900" y="560" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="deployPeertube" value="Deployment: peertube (replicas=1)&#10;nodeSelector/toleration -&gt; gpu01" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f8f8f8;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="500" width="260" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="podPeertube" value="Pod: peertube&#10;chocobozzz/peertube:production-bookworm&#10;:9000（內部監聽埠，跟外部 443 無關）&#10;無 capabilities.drop（entrypoint 需要 root 自降權）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="540" width="220" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- Postgres component -->
+        <mxCell id="svcPostgres" value="Service: postgres（headless）&#10;clusterIP: None，:5432" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="900" y="200" width="220" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="stsPostgres" value="StatefulSet: postgres (replicas=1)&#10;nodeSelector/toleration -&gt; gpu01" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f8f8f8;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="120" width="280" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="podPostgres" value="Pod: postgres-0&#10;postgres:16.4-alpine&#10;:5432&#10;無 capabilities.drop（entrypoint 需要 root 自降權）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="160" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="pvcPostgres" value="PVC: data (RWO, 5Gi)&#10;storageClassName: rook-ceph-block" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="260" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cmInitdb" value="ConfigMap: postgres-initdb&#10;掛載於 /docker-entrypoint-initdb.d/&#10;首次啟動自動執行：建立 pg_trgm / unaccent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="900" y="120" width="240" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Redis component -->
+        <mxCell id="svcRedis" value="Service: redis（headless）&#10;clusterIP: None，:6379" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="900" y="900" width="220" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="deployRedis" value="Deployment: redis (replicas=1)&#10;nodeSelector/toleration -&gt; gpu01" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f8f8f8;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="850" width="280" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="podRedis" value="Pod: redis&#10;redis:7.4-alpine&#10;:6379&#10;無 capabilities.drop（entrypoint chown 需要 root）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="890" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="emptyDirRedis" value="emptyDir: data（非 PVC）&#10;job queue / 快取，Pod 重建可接受遺失" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="990" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Storage contrast note -->
+        <mxCell id="contrastNote" value="PVC vs emptyDir 對照：postgres 用 StatefulSet + PVC（影片/使用者資料不能弄丟）；&#10;redis 用 Deployment + emptyDir（背景工作佇列/快取，重建 Pod 頂多重跑任務）。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;fontSize=11;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="620" y="1080" width="600" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="client" target="gateway">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1label" value="HTTPS (Host: peertube.nexai.org.com)" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e1">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="gateway" target="route">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2label" value="parentRefs (sectionName: https)" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e2">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="route" target="svcPeertube">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3label" value="backendRefs :80（不是 containerPort 9000）" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e3">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="svcPeertube" target="podPeertube">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4label" value="selector app=peertube" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e4">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="podPeertube" target="svcPostgres">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5label" value="PEERTUBE_DB_HOSTNAME=postgres :5432" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e5">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="svcPostgres" target="podPostgres">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6label" value="selector app=postgres" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e6">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="podPostgres" target="pvcPostgres">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="cmInitdb" target="podPostgres">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8label" value="掛載並於首次初始化時自動執行" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e8">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="podPeertube" target="svcRedis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9label" value="PEERTUBE_REDIS_HOSTNAME=redis :6379" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e9">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="svcRedis" target="podRedis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10label" value="selector app=redis" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e10">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="podRedis" target="emptyDirRedis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="rq" target="nsPeertube">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12label" value="限制整個 namespace 用量（postgres+redis+peertube 三者共用）" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e12">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

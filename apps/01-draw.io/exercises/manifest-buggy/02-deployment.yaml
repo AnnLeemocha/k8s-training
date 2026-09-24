@@ -1,0 +1,96 @@
+# Step 3：部署 draw.io 應用程式本體
+# 教學重點：
+#   - Deployment 管理 ReplicaSet / Pod 的期望狀態與滾動更新策略。
+#   - draw.io 是「無狀態」應用（沒有需要持久保存的資料），
+#     所以是整堂課最單純的起點：不需要 PVC、不需要外部資料庫。
+#   - requests/limits：讓排程器知道該把 Pod 排到哪個節點，並避免吃光節點資源。
+#   - livenessProbe / readinessProbe：示範 K8s 如何自我修復（重啟不健康的容器）
+#     以及如何在 Pod 尚未就緒前，不讓 Service 把流量導進來。
+#   - securityContext：企業環境常見的容器安全基本盤（最小權限原則）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drawio
+  namespace: drawio
+  labels:
+    app: drawio
+spec:
+  # 期望維持幾個一模一樣的 Pod。
+  replicas: 2
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: drawio
+  strategy:
+    # RollingUpdate：更新時逐步汰換 Pod，不會一次全部砍掉（對照 Recreate）。
+    type: RollingUpdate
+    rollingUpdate:
+      # 更新時最多可以「多」出 1 個 Pod（先建新的，再砍舊的）。
+      maxSurge: 1
+      # 更新時最多允許「少」0 個 Pod，也就是更新過程中服務不中斷。
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: drawio
+    spec:
+      containers:
+        - name: drawio
+          image: jgraph/drawio:24.7.17
+          # IfNotPresent：節點上已有這個 image 就直接用，不重新拉取
+          # （多數情況省頻寬；若 tag 被覆寫過會抓不到新版，要改用 Always）。
+          imagePullPolicy: IfNotPresent
+          ports:
+            # 純宣告用途，方便用名稱 `http` 被下面的 probe/Service 引用，
+            # K8s 本身不會因為沒宣告而擋掉其他 port。
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            # requests：排程器保證一定拿得到的資源量，用來決定這個 Pod
+            # 會被排到哪個節點（節點剩餘容量必須 >= requests）。
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            # limits：容器實際執行時的資源封頂值，超過 CPU limit 會被
+            # 限流，超過 memory limit 會被 OOMKilled。
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # readinessProbe：探測「現在能不能收流量」，失敗只會把 Pod
+          # 從 Service 的 Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8081
+            # 容器啟動後等 10 秒才開始第一次探測，給應用程式開機時間。
+            initialDelaySeconds: 10
+            # 之後每 10 秒探測一次。
+            periodSeconds: 10
+            # 單次探測超過 3 秒沒回應就視為失敗。
+            timeoutSeconds: 3
+            # 連續失敗 3 次，才會被標記為 NotReady。
+            failureThreshold: 3
+          # livenessProbe：探測「容器是不是還活著」，失敗會直接重啟容器，
+          # 是比 readinessProbe 更激進的處置，數值通常要抓得比較保守。
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            # 禁止容器內程序透過 setuid 之類的手法拿到比原本更高的權限。
+            allowPrivilegeEscalation: false
+            capabilities:
+              # 把 Linux capabilities 全部收回，容器只保留一般使用者權限
+              # （最小權限原則；draw.io 本身不需要任何特殊 capability）。
+              drop:
+                - ALL
+      securityContext:
+        # Pod 層級：掛載進來的 Volume 會被強制改成這個 group 擁有，
+        # 讓非 root 使用者也能讀寫（draw.io 這裡沒有掛 Volume，寫出來
+        # 是為了跟其他有 PVC 的產品保持一致的教學範例）。
+        fsGroup: 1000

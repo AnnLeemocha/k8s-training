@@ -1,0 +1,111 @@
+# Step 4：部署 CloudBeaver 本體
+# 教學重點：
+#   - CloudBeaver 是 DBeaver 官方的 Web 版本，同一個介面可以建立多組
+#     連線、支援 MySQL/PostgreSQL 等多種資料庫，用來集中查看/驗證這門課
+#     其他產品用到的資料庫內容，不需要每個資料庫各自找一套工具。
+#   - 管理員帳號**沒有**用設定檔自動建立（曾經試過用 ConfigMap 蓋掉
+#     image 內建的 conf/initial-data.conf、帶入 adminName/adminPassword
+#     想跳過網頁精靈，結果在這個版本反而觸發另一個更嚴重的 schema
+#     migration bug，容器直接開機失敗，所以放棄這條路，改回官方預設檔案）
+#     ——第一次啟動一樣要跑網頁設定精靈，細節見 README「上課前請先確認」。
+#   - readinessProbe/livenessProbe 的 initialDelaySeconds 給得比較保守：
+#     剛在 mysql 併入 flarum 時實測到「livenessProbe 太早開始檢查，會在
+#     應用程式還在初始化時就把容器砍掉」的教訓，Java 應用的冷啟動通常比
+#     PHP/Node 慢，這裡直接抓寬一點，避免重蹈覆轍。
+#   - securityContext 沒有 drop capabilities：實測過，CloudBeaver 官方
+#     entrypoint 一樣是「用 root 先 chown 掛進來的 workspace PVC，再
+#     su 降權成內部使用者」的模式，跟 mysql/postgres/redis/flarum 同一種
+#     教訓——drop 掉 capabilities 會讓 chown/su 失敗，容器直接啟動失敗
+#     （`Operation not permitted`）。這門課目前唯一能放心全部 drop
+#     capabilities 的資料庫周邊工具是 Adminer，不是 CloudBeaver。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudbeaver
+  namespace: cloudbeaver
+  labels:
+    app: cloudbeaver
+spec:
+  # 只跑 1 個 Pod：workspace PVC 是 ReadWriteOnce，且 CloudBeaver 把
+  # 使用者/連線設定存成本機檔案，多個 replica 同時讀寫同一份 workspace
+  # 會互相打架，這個工具型應用本來就沒有水平擴展的需求。
+  replicas: 1
+  strategy:
+    # Recreate：更新時先砍掉舊 Pod 才建新的（對照 RollingUpdate）。
+    # 因為 workspace PVC 是 RWO，若用 RollingUpdate 新舊 Pod 會同時
+    # 搶掛同一顆 PVC，導致新 Pod 卡在 Pending，這裡刻意選擇 Recreate
+    # 換取「單一 replica + RWO」情境下能穩定更新，代價是更新時會短暫斷線。
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cloudbeaver
+  template:
+    metadata:
+      labels:
+        app: cloudbeaver
+    spec:
+      # 關閉 K8s 自動把同 namespace 其他 Service 資訊灌進環境變數
+      # （例如 FOO_SERVICE_HOST），避免跟 CloudBeaver 自己的設定或
+      # 之後接的資料庫連線資訊搞混。
+      enableServiceLinks: false
+      containers:
+        - name: cloudbeaver
+          # 用 latest 是為了示範官方最新版；正式環境應該釘住明確版本號，
+          # 避免哪天 image 更新造成教學當下的行為跟預期不一致。
+          image: dbeaver/cloudbeaver:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8978
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            # Java 應用冷啟動比較慢，這裡比一般 PHP/Node 應用（10 秒）
+            # 給得更久一些，避免應用程式還在初始化時就被判定 NotReady。
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # 容忍多次失敗才判定 NotReady，避免初始化過程中偶發的慢回應
+            # 就被踢出 Service Endpoints。
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            # 給到 90 秒才開始第一次存活檢查，比一般應用（20~30 秒）
+            # 高出許多：這是實測踩過的坑——曾經因為給得太短，容器在
+            # JVM 還沒完全啟動時就被 livenessProbe 判定失敗並強制重啟，
+            # 導致永遠啟動不完成（不斷重啟迴圈）。
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          # 這個容器刻意沒有寫 securityContext（也就沒有 capabilities.drop:
+          # [ALL] 這種最小權限設定）：官方 entrypoint 會先用 root 權限
+          # chown workspace PVC，再降權成內部使用者執行，若在這裡加上
+          # drop ALL，chown/su 這個步驟會直接失敗、容器開機失敗
+          # （Operation not permitted）。詳見本檔最上方教學重點說明，
+          # 這是刻意的例外，不是漏寫。
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # 掛到 CloudBeaver 內部設定/使用者資料的目錄
+            # （GlobalConfigurationDir），對應上一步建立的 PVC。
+            - name: workspace
+              mountPath: /opt/cloudbeaver/workspace
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: cloudbeaver-workspace

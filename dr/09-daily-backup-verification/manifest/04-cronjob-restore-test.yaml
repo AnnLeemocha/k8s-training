@@ -1,0 +1,59 @@
+# =============================================================================
+# 09-daily-backup-verification / manifest/04-cronjob-restore-test.yaml
+# 每週自動 Restore Test：把最新的每日備份中的 dr-demo 還原到 dr-restore-test，
+# 用 check-data.sh 驗證資料，通過後清除，並回報耗時（實測 RTO 參考）。
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: restore-test
+  namespace: dr-ops
+spec:
+  schedule: "0 4 * * 1"                 # 每週一 04:00 UTC（台灣 12:00），在 backup-check 之後
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600       # 還原 + 驗證最多 1 小時
+      template:
+        spec:
+          serviceAccountName: backup-verifier
+          restartPolicy: Never
+          containers:
+            - name: restore-test
+              image: alpine/k8s:1.35.6
+              command: ["bash", "/scripts/restore-test.sh"]
+              env:
+                - name: SCHEDULE_NAME
+                  value: daily-full-backup
+                - name: SOURCE_NS
+                  value: dr-demo        # 要驗證的應用
+                - name: TARGET_NS
+                  value: dr-restore-test
+                - name: CHECK_SCRIPT
+                  value: /scripts/check-data.sh
+                - name: RESTORE_TIMEOUT_MIN
+                  value: "30"
+                - name: KEEP_ON_FAILURE
+                  value: "true"         # 驗證失敗時保留還原結果供除錯
+                - name: CLUSTER_NAME
+                  value: k8s-training
+                - name: WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-notify
+                      key: WEBHOOK_URL
+                      optional: true
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { memory: 128Mi }
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+          volumes:
+            - name: scripts
+              configMap:
+                name: backup-verify-scripts
+                defaultMode: 0755

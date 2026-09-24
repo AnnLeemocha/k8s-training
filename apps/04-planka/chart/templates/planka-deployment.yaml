@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planka
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: planka
+    {{- include "planka.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: planka
+  template:
+    metadata:
+      labels:
+        app: planka
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: planka
+          image: "{{ .Values.planka.image.repository }}:{{ .Values.planka.image.tag }}"
+          env:
+            - name: BASE_URL
+              value: {{ .Values.planka.baseUrl | quote }}
+            - name: TRUST_PROXY
+              value: "true"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: DATABASE_URL
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: SECRET_KEY
+            - name: DEFAULT_ADMIN_EMAIL
+              value: {{ .Values.planka.admin.email | quote }}
+            - name: DEFAULT_ADMIN_NAME
+              value: {{ .Values.planka.admin.name | quote }}
+            - name: DEFAULT_ADMIN_USERNAME
+              value: {{ .Values.planka.admin.username | quote }}
+            - name: DEFAULT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: planka-secret
+                  key: DEFAULT_ADMIN_PASSWORD
+          ports:
+            - name: http
+              containerPort: 1337
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.planka.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      securityContext:
+        fsGroup: 1000
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: planka-data

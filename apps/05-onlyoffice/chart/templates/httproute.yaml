@@ -1,0 +1,27 @@
+# 前置條件：叢集已套用 shared-infra/00-dev-gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: onlyoffice
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onlyoffice.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    {{- range .Values.gateway.sectionNames }}
+    - name: {{ $.Values.gateway.name }}
+      namespace: {{ $.Values.gateway.namespace }}
+      sectionName: {{ . }}
+    {{- end }}
+  hostnames:
+    {{- range .Values.hostnames }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: onlyoffice
+          port: {{ .Values.service.port }}

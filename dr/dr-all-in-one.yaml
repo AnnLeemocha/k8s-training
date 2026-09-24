@@ -1,0 +1,214 @@
+# =============================================================================
+# dr-demo — 完整合併版 manifest（單檔一次套用）
+#
+# 教學拆解版在 manifest/ 目錄（00~05 依序 apply，適合逐步講解）；
+# 這份是給「已經教完拆解版、要快速重建環境」或「demo 用」的合併版，
+# 內容與 manifest/ 目錄逐檔內容完全一致。
+#
+# 用法：
+#   kubectl apply -f dr-all-in-one.yaml
+#   ./script/write-postgres.sh      # 寫入 DB 驗證資料
+#   ./script/check-data.sh          # 確認 DB + CephFS 驗證資料都在
+# 清除（等同模擬「應用程式災難」，PV reclaimPolicy=Delete，資料會一起消失！）：
+#   kubectl delete namespace dr-demo
+# =============================================================================
+# =============================================================================
+# dr-demo / 00-namespace.yaml
+# 備份還原課程的「受害者」應用所在的 namespace。
+# 整個課程的主線就是：備份這個 namespace → 刪掉它（模擬災難）→ 用 Velero 救回來。
+# Velero 最常見的備份單位就是「namespace」，所以一個應用一個 namespace
+# 不只是隔離的好習慣，也讓備份/還原的範圍一目了然。
+# =============================================================================
+apiVersion: v1                 # Namespace 屬於 core API group，版本固定是 v1
+kind: Namespace                # 資源種類：命名空間（cluster-scoped，本身沒有 namespace 欄位）
+metadata:
+  name: dr-demo                # namespace 名稱；Velero 備份時用 --include-namespaces dr-demo 指定
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    # Velero 也能用 label 挑選要備份的東西（--selector），但 selector 是套用在
+    # 「每一個資源」上，不是只看 namespace 的 label —— 詳見 03-first-backup。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: dr-demo
+---
+# =============================================================================
+# dr-demo / 01-postgres-pvc.yaml
+# PostgreSQL 的資料磁碟：Ceph RBD（區塊儲存）。
+# 備份重點：這塊磁碟裡的「資料」不在 etcd 裡，etcd 只存這個 PVC 物件的「描述」。
+# Velero 要救回資料，必須額外做 Volume 備份（本叢集用 CSI Snapshot + Data Mover）。
+# =============================================================================
+apiVersion: v1                          # PVC 屬於 core API group
+kind: PersistentVolumeClaim             # 向 StorageClass「申請」一塊磁碟
+metadata:
+  name: postgres-data                   # Deployment 用這個名字掛載
+  namespace: dr-demo
+spec:
+  accessModes:
+    - ReadWriteOnce                     # RWO：同一時間只能被一個節點掛載讀寫，資料庫就該單一寫入者
+  storageClassName: rook-ceph-block     # 叢集沒有 default SC，一定要明確指定；
+                                        # 還原到別的叢集時，目標叢集也必須有同名 SC（見 05-backup-pitfalls 情境 4）
+  resources:
+    requests:
+      storage: 10Gi                     # 申請容量；Velero Data Mover 只搬「實際用到」的資料，不是 10Gi 全搬
+---
+# =============================================================================
+# dr-demo / 02-postgres.yaml
+# PostgreSQL 本體：Secret（帳密）+ Deployment + Service。
+# 還原驗證時的判斷標準：不是「Pod Running」，而是 `SELECT * FROM disaster_test;`
+# 查得到災難前寫入的 DR-TEST-DB-001 那一筆資料（見 script/check-data.sh）。
+# =============================================================================
+apiVersion: v1
+kind: Secret                            # 敏感資料；Velero 預設會備份 Secret（備份檔內是 base64，不是加密！）
+metadata:
+  name: postgres-secret
+  namespace: dr-demo
+type: Opaque                            # 一般 key/value 型 Secret
+stringData:                             # 明文撰寫，API Server 寫入時自動轉 base64 存到 data
+  POSTGRES_USER: drtest                 # 官方 image 首次 initdb 時建立的使用者
+  POSTGRES_PASSWORD: drtest-password    # 教學用固定密碼；注意：只在「空資料目錄」第一次初始化時生效
+  POSTGRES_DB: drdemo                   # 首次初始化時建立的資料庫
+---
+apiVersion: apps/v1
+kind: Deployment                        # 單副本 DB 用 Deployment 示範；正式環境建議 StatefulSet
+metadata:
+  name: postgres
+  namespace: dr-demo
+spec:
+  replicas: 1                           # RWO 磁碟只能被一個 Pod 掛載
+  selector:
+    matchLabels:
+      app: postgres                     # Deployment 用這個 label 找到自己管理的 Pod
+  template:
+    metadata:
+      labels:
+        app: postgres                   # 必須與 selector 一致；Service 也靠它導流
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16            # 官方 PostgreSQL 16
+          ports:
+            - containerPort: 5432       # PostgreSQL 預設 port（宣告用途，實際不影響連線）
+          env:
+            - name: POSTGRES_USER       # 從 Secret 讀使用者名稱
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret # Secret 不存在 → Pod 卡在 CreateContainerConfigError
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD   # 從 Secret 讀密碼
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB         # 從 Secret 讀資料庫名稱
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB
+
+            # PostgreSQL 資料放在 PVC 底下的子目錄，
+            # 避免 /var/lib/postgresql/data 的 lost+found 造成 initdb 失敗
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          volumeMounts:
+            - name: postgres-data                # 對應下方 volumes 的名稱
+              mountPath: /var/lib/postgresql/data  # 資料庫檔案實際寫在這裡 → 也就是 PVC 裡
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-data    # 對應 01-postgres-pvc.yaml
+---
+apiVersion: v1
+kind: Service                           # 穩定的連線入口：postgres.dr-demo.svc.cluster.local
+metadata:
+  name: postgres
+  namespace: dr-demo
+spec:
+  selector:
+    app: postgres                       # 導流到 label app=postgres 的 Pod
+  ports:
+    - port: 5432                        # Service port
+      targetPort: 5432                  # 容器 port
+  # 注意：還原後 ClusterIP 會重新分配（實測 172.31.212.253 → 172.31.248.152），
+  # 應用程式一律用 DNS 名稱連線，不要寫死 IP。
+---
+# =============================================================================
+# dr-demo / 03-cephfs-pvc.yaml
+# 共享檔案磁碟：CephFS（檔案系統，RWX）。
+# 跟 01 的 RBD（區塊，RWO）形成對照 —— 兩種 Ceph 儲存都要能備份、都要能還原，
+# 課程會分別驗證「資料庫的資料」與「檔案系統的檔案」都真的回來了。
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-data
+  namespace: dr-demo
+spec:
+  accessModes:
+    - ReadWriteMany                     # RWX：多個節點上的多個 Pod 可同時讀寫
+  storageClassName: rook-cephfs         # CephFS；Velero 透過 csi-cephfsplugin-snapclass 拍快照
+  resources:
+    requests:
+      storage: 5Gi
+---
+# =============================================================================
+# dr-demo / 04-cephfs-pod1.yaml
+# 寫入端：把一個「驗證用的標記檔」寫進 CephFS。
+# 還原後只要讀得到 DR-TEST-FS-001，就證明檔案資料真的救回來了。
+#
+# 教學提醒：這裡刻意用「裸 Pod」而不是 Deployment。裸 Pod 被刪就不會自己長回來，
+# 而且 Velero 還原時會跳過已經 Succeeded/Failed 的 Pod —— 適合拿來討論
+# 「備份時 Pod 的狀態」會影響還原結果。
+# =============================================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cephfs-test-1
+  namespace: dr-demo
+spec:
+  containers:
+    - name: test
+      image: busybox:1.36               # 極小的測試用 image
+      command:
+        - sh
+        - -c
+        - |
+          echo "DR-TEST-FS-001" > /shared/dr-test.txt
+          echo "CephFS Disaster Recovery Test" >> /shared/dr-test.txt
+          sleep 36000
+      # 注意：這裡每次啟動都會「覆寫」檔案；還原後這個 Pod 重新啟動也會重寫同樣內容，
+      # 所以驗證 CephFS 時請看檔案時間戳記，或改用只讀 Pod（見 04-first-restore）。
+      volumeMounts:
+        - name: shared
+          mountPath: /shared            # CephFS 掛載點
+  volumes:
+    - name: shared
+      persistentVolumeClaim:
+        claimName: shared-data          # 對應 03-cephfs-pvc.yaml
+---
+# =============================================================================
+# dr-demo / 05-cephfs-pod2.yaml
+# 讀取端：另一個 Pod 同時掛同一個 CephFS，證明 RWX 真的是「共享」。
+# =============================================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cephfs-test-2
+  namespace: dr-demo
+spec:
+  containers:
+    - name: test
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          cat /shared/dr-test.txt
+          sleep 36000
+      volumeMounts:
+        - name: shared
+          mountPath: /shared            # 跟 cephfs-test-1 同一個 PVC、同一份檔案
+  volumes:
+    - name: shared
+      persistentVolumeClaim:
+        claimName: shared-data

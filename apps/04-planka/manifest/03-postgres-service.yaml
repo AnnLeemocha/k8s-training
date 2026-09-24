@@ -1,0 +1,24 @@
+# Step 4：PostgreSQL 的 Headless Service（搭配 StatefulSet）
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: planka
+  labels:
+    app: postgres
+spec:
+  # clusterIP: None 是「Headless Service」的關鍵設定：不配發虛擬 IP，
+  # 而是直接回傳背後 Pod 的 IP（搭配 StatefulSet 才有穩定的 DNS 紀錄，
+  # 例如 postgres-0.postgres.planka.svc.cluster.local）。對照一般
+  # Service，這裡的目的是「連到特定那顆 Pod」而不是「連到隨便一個」。
+  clusterIP: None
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      # Service 自己曝露的 port。
+      port: 5432
+      # 實際轉送到 Pod 的哪個 port；用名稱對應 StatefulSet 裡
+      # containerPort 宣告的 name，不用寫死數字 5432。
+      targetPort: postgres

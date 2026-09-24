@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cloudbeaver.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudbeaver.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: cloudbeaver
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

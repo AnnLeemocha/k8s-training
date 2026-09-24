@@ -1,0 +1,506 @@
+# filebrowser（FileBrowser Quantum）— 完整合併版 manifest（單檔一次套用）
+#
+# 教學拆解版在 manifest/ 目錄（00~07 依序 apply，適合逐步講解）；
+# 這份是給「已經教完拆解版、要快速重建環境」或「demo 用」的合併版，
+# 內容與 manifest/ 目錄逐檔內容完全一致。
+#
+# 本產品已從官方 filebrowser/filebrowser（2026-09-01 封存）遷移到
+# FileBrowser Quantum，原因與版本選擇說明見 ../README.md。
+#
+# 前置條件：先套用共用的 ../shared-infra/00-dev-gateway.yaml，
+# 且 onlyoffice 產品要先部署好（本產品的 OnlyOffice 整合設定會呼叫它）。
+#
+# 用法：
+#   kubectl apply -f filebrowser-all-in-one.yaml
+# 清除：
+#   kubectl delete namespace filebrowser
+
+# Step 1：建立本產品專屬的 Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: filebrowser
+  labels:
+    # 純標記用途，方便日後用 `kubectl get ns -l xxx` 篩選同一堂課/同一產品的資源，
+    # 對 K8s 本身沒有任何特殊行為意義。
+    app.kubernetes.io/part-of: k8s-training
+    training/product: filebrowser
+---
+# Step 2：資源配額與預設值
+# 教學重點：跟 draw.io 的 quota 多一項 —— 這裡多限制了 requests.storage
+# 與 persistentvolumeclaims 數量，因為 filebrowser 這個產品開始會用到 PVC，
+# 企業場景常見「一個團隊最多能申請多少 PVC / 多少總儲存空間」的配額管控。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: filebrowser-quota
+  namespace: filebrowser
+spec:
+  hard:
+    # requests.* 是整個 namespace 承諾要保留給它的資源總和上限，
+    # 排程器用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "500m"
+    requests.memory: 512Mi
+    # limits.* 是整個 namespace 所有容器最多能吃到的資源總和上限，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "1"
+    limits.memory: 1Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod。
+    pods: "5"
+    # 這個 namespace 最多能建立幾個 PVC——filebrowser 固定用兩顆
+    # （檔案本體 + sqlite 資料庫），這裡設 4 留一點餘裕給示範/除錯用。
+    persistentvolumeclaims: "4"
+    # 這個 namespace 所有 PVC 的 requests.storage 加總上限，
+    # 對照下面 02-pvc.yaml 兩顆 PVC 共 11Gi，還留有空間可調大。
+    requests.storage: 20Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: filebrowser-limitrange
+  namespace: filebrowser
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 200m
+        memory: 256Mi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）。
+      max:
+        cpu: 500m
+        memory: 512Mi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 25m
+        memory: 32Mi
+---
+# Step 3：持久化儲存（本產品跟 draw.io 最大的不同）
+# 教學重點：filebrowser 是「有狀態」應用，需要兩種不同性質的資料：
+#   1) filebrowser-srv：實際被瀏覽/上傳的檔案本體。用 RWX（rook-cephfs），
+#      示範「多個 Pod 可以同時掛同一份檔案」——即使目前只跑 1 個 replica，
+#      這個選擇也讓未來要擴充/做維運熱更新時，新舊 Pod 能同時讀寫同一份資料。
+#   2) filebrowser-db：FileBrowser Quantum 自己的 sqlite 資料庫與快取
+#      （掛在 /home/filebrowser/data，見 04-deployment.yaml）。用 RWO
+#      （rook-ceph-block），因為 sqlite 本來就不支援多個行程同時寫入，
+#      刻意跟上面的 RWX 做對比，讓學員理解「RWO vs RWX 該怎麼選」不是
+#      看應用程式種類，而是看『這份資料允不允許被多個 Pod 同時寫入』。
+#      這點從舊版 filebrowser/filebrowser 換到 Quantum 都沒有變。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: filebrowser-srv
+  namespace: filebrowser
+spec:
+  accessModes:
+    # ReadWriteMany：同一份 Volume 可以同時被多個節點上的多個 Pod
+    # 掛載讀寫。这裡選它不是因為現在有多個 replica，而是「檔案本體」
+    # 這種資料本質上允許被多方同時存取，換成 rolling update 或未來
+    # 擴充多 replica 時不需要改儲存架構。
+    - ReadWriteMany
+  # rook-cephfs：這座叢集裡支援 RWX 的儲存類別（CephFS），
+  # 對照下面 rook-ceph-block 只支援 RWO。
+  storageClassName: rook-cephfs
+  resources:
+    requests:
+      # PVC 跟儲存系統申請的容量下限，實際能否拿到看 StorageClass
+      # 後端（這裡是 rook-cephfs）是否還有剩餘容量。
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: filebrowser-db
+  namespace: filebrowser
+spec:
+  accessModes:
+    # ReadWriteOnce：同一時間只能被一個節點掛載讀寫。sqlite 本來就
+    # 不支援多個行程同時寫入同一個檔案，就算 K8s 允許多掛也沒用，
+    # 選 RWO 剛好符合這份資料實際的存取限制。
+    - ReadWriteOnce
+  # rook-ceph-block：這座叢集裡只給單一節點掛載的區塊儲存類別
+  # （Ceph RBD），比 rook-cephfs 更輕量，適合這種單一行程存取的資料。
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      # sqlite 資料庫 + 快取，教學用途資料量小，1Gi 夠用（README 有
+      # 記錄實測時出現快取空間偏小的警告，長期使用建議調大）。
+      storage: 1Gi
+---
+# Step 4：FileBrowser Quantum 的設定檔
+# 教學重點：舊版 filebrowser/filebrowser 只靠 FB_ROOT / FB_DATABASE 兩個
+# 環境變數就能決定行為；FileBrowser Quantum 改成一份宣告式的 config.yaml，
+# 功能變多了（登入方式、每個來源的規則、OnlyOffice 整合…），設定也跟著
+# 變成一份結構完整的檔案——這是換代最直接能感受到的差異，可以藉此帶到
+# 「功能與設定複雜度的取捨」。
+#
+# 這裡只填有教學意義、非填不可的欄位，其餘沿用官方預設值：
+#   - server.sources：檔案來源，對應 02-pvc.yaml 的 filebrowser-srv（掛在 /srv）。
+#   - server.database / server.cacheDir：都指到 filebrowser-db（掛在
+#     /home/filebrowser/data），跟 02-pvc.yaml 的註解一致——sqlite 設定資料庫
+#     不能被多個行程同時寫入，這點跟舊版一樣沒變。
+#   - server.internalUrl：**實測踩到的坑**——如果不填這個欄位，
+#     filebrowser 會拿使用者瀏覽器連進來的網址（`filebrowser.nexai.org.com`）
+#     組出下載連結，叫 Document Server 回頭去抓檔案內容／回報存檔結果。
+#     但 onlyoffice pod 連不到叢集外部的 dev-gateway 網域（NetworkPolicy
+#     也沒開放），實測會直接在編輯器畫面顯示「目前無法存取該檔案」。
+#     填了這個欄位後，filebrowser 會改用叢集內部 Service DNS 組網址，
+#     onlyoffice pod 才連得到——對應地，onlyoffice 那邊的 NetworkPolicy
+#     也要新增一條 egress 規則放行連到 filebrowser namespace，見
+#     ../../onlyoffice/manifest/07-networkpolicy.yaml。
+#   - integrations.office：串接 onlyoffice namespace 的 Document Server。
+#     `secret` 必須跟 ../../onlyoffice/manifest/02-secret.yaml 的
+#     JWT_SECRET **逐字一致**，否則雙方簽章對不上、編輯器打不開。
+#     `url` 是使用者瀏覽器要載入的位址（走 dev-gateway 對外網域）；
+#     `internalUrl` 是 filebrowser 後端自己呼叫 Document Server 用的
+#     叢集內部 Service DNS，兩者服務對象不同、不能混用。
+#   - server.disableUpdateCheck：**實測踩到的坑，跟 onlyoffice 那邊
+#     PLUGINS_ENABLED 是同一類問題**——Quantum 預設啟動時會「同步、
+#     阻塞式」呼叫 `https://api.github.com/repos/.../tags` 檢查有沒有
+#     新版本，這座叢集的 NetworkPolicy 沒開放對外網際網路，連線會被
+#     悄悄丟棄，實測每次啟動都卡在這裡整整 31 秒（TCP connect timeout）
+#     才繼續往下執行，而不是啟動失敗。關掉這個檢查後，開機時間從
+#     ~31 秒降到 2~3 秒，readiness/liveness probe 才不會在它卡住連線的
+#     時候把 Pod 誤判成壞掉而不斷重啟。零信任網路下「預設會打外網的
+#     背景工作要嘛開白名單、要嘛乾脆關掉」，這是第二個活教材。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebrowser-config
+  namespace: filebrowser
+data:
+  config.yaml: |
+    server:
+      # 容器內部監聽的 port，要跟下面 04-deployment.yaml 的
+      # containerPort/readinessProbe 一致。
+      port: 80
+      # 網站掛在網域的哪個路徑下；"/" 代表直接掛根路徑，不用子路徑。
+      baseURL: "/"
+      disableUpdateCheck: true
+      internalUrl: "http://filebrowser.filebrowser.svc.cluster.local"
+      database: "/home/filebrowser/data/filebrowser.db"
+      cacheDir: "/home/filebrowser/data/cache"
+      sources:
+        - path: "/srv"
+          # 這個來源在 UI 上顯示的名稱，跟下面 API 呼叫的
+          # `?source=files` 對應（見 ../README.md 的驗證指令）。
+          name: "files"
+          config:
+            # 使用者登入後預設就能看到這個來源，不用手動啟用。
+            defaultEnabled: true
+    auth:
+      # 預設管理員帳密，僅供教學示範使用，上課示範完務必請學員修改
+      # （見 ../README.md「上課前請先確認 / 調整」）。
+      adminUsername: "admin"
+      adminPassword: "admin"
+      methods:
+        password:
+          enabled: true
+          # 密碼最短長度，教學用途調低方便示範，正式環境應提高。
+          minLength: 5
+    userDefaults:
+      account:
+        # 新使用者預設帳號權限：能修改（改名/刪除/上傳覆蓋）與下載檔案，
+        # 但不包含建立/管理其他使用者等管理員權限。
+        permissions:
+          modify: true
+          download: true
+    integrations:
+      office:
+        # 使用者瀏覽器要載入 Document Server 編輯畫面用的網址，
+        # 走 dev-gateway 對外網域（跟 internalUrl 服務對象不同，見上方
+        # 檔頭教學重點，不能混用）。
+        url: "http://onlyoffice.nexai.org.com"
+        internalUrl: "http://onlyoffice.onlyoffice.svc.cluster.local"
+        # 必須跟 ../../onlyoffice/manifest/02-secret.yaml 的
+        # JWT_SECRET 逐字一致，否則雙方簽章對不上、編輯器打不開。
+        secret: "TrainingOnlyofficeJwtSecret_ChangeMe"
+---
+# Step 5：部署 FileBrowser Quantum 本體
+# 教學重點：
+#   - replicas 刻意只給 1：跟舊版一樣，設定/使用者資料庫還是 sqlite，
+#     不支援多個行程同時寫入，「不是所有應用都能無腦水平擴展」的結論
+#     沒有因為換版本而改變。
+#   - image 換成 `gtstef/filebrowser:1.5.6-stable`（FileBrowser Quantum
+#     官方標記的穩定線，非 v2.0.0 beta），原因見 ../README.md。
+#   - 不再用環境變數決定行為，改成掛載 03-configmap.yaml 產生的
+#     config.yaml。**實測發現的坑**：這個 image 的 entrypoint 不會把
+#     `args` 裡的 `-c <path>` 轉發給底層執行檔，一律回頭找
+#     `/home/filebrowser/data/config.yaml`（官方文件說的「推薦掛法」預設
+#     路徑），就算 command/args 寫了 `-c` 也一樣，實測會直接 FATAL
+#     找不到檔案。解法：不跟 entrypoint 對抗，改用 `subPath` 把
+#     ConfigMap 的 config.yaml 直接疊到這個預設路徑上。
+#   - volumeMounts 對應到 02-pvc.yaml 建立的兩顆 PVC：
+#     /srv 掛 filebrowser-srv（檔案本體，跟舊版路徑一致，沒有改變），
+#     /home/filebrowser/data 掛 filebrowser-db（sqlite 資料庫 + 快取），
+#     這是 Quantum 官方文件建議的持久化資料目錄，config.yaml 也疊在
+#     這顆 PVC 底下的同一個路徑裡。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: filebrowser
+  namespace: filebrowser
+  labels:
+    app: filebrowser
+spec:
+  # 期望維持幾個一模一樣的 Pod；固定為 1，理由見上方檔頭
+  # （sqlite 資料庫不支援多個行程同時寫入）。
+  replicas: 1
+  strategy:
+    # Recreate：更新時先砍光所有舊 Pod，才建立新 Pod，過程中會有短暫
+    # 服務中斷（對照 draw.io 用的 RollingUpdate 邊建新邊砍舊）。
+    # 這裡刻意選它，是因為同一份 sqlite 資料庫檔案不能同時被新舊兩個
+    # Pod 掛著寫入，用 RollingUpdate 反而會造成資料庫鎖死/損毀風險。
+    type: Recreate
+  selector:
+    # 要「管理」哪些 Pod：透過 label 找，必須跟下面 template.metadata.labels 一致。
+    matchLabels:
+      app: filebrowser
+  template:
+    metadata:
+      labels:
+        app: filebrowser
+    spec:
+      containers:
+        - name: filebrowser
+          image: gtstef/filebrowser:1.5.6-stable
+          # IfNotPresent：節點上已有這個 image 就直接用，不重新拉取。
+          imagePullPolicy: IfNotPresent
+          ports:
+            # 純宣告用途，方便用名稱 `http` 被下面的 probe/Service 引用。
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          resources:
+            # requests：排程器保證一定拿得到的資源量，用來決定這個 Pod
+            # 會被排到哪個節點。
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            # limits：容器實際執行時的資源封頂值，超過 CPU limit 會被
+            # 限流，超過 memory limit 會被 OOMKilled。
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          # readinessProbe：探測「現在能不能收流量」，失敗只會把 Pod
+          # 從 Service 的 Endpoints 移除，不會重啟容器。
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            # 容器啟動後等 5 秒才開始第一次探測（Quantum 開機快，
+            # 關掉 disableUpdateCheck 後不用等太久）。
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          # livenessProbe：探測「容器是不是還活著」，失敗會直接重啟容器，
+          # 是比 readinessProbe 更激進的處置，數值抓得比 readiness 保守
+          # （initialDelaySeconds/periodSeconds 都更長，避免誤殺）。
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          securityContext:
+            # 禁止容器內程序透過 setuid 之類的手法拿到比原本更高的權限。
+            allowPrivilegeEscalation: false
+            capabilities:
+              # 把 Linux capabilities 全部收回，容器只保留一般使用者權限
+              # （最小權限原則）。
+              drop:
+                - ALL
+          volumeMounts:
+            # 檔案本體（RWX），對應 02-pvc.yaml 的 filebrowser-srv，
+            # 路徑跟 03-configmap.yaml 的 server.sources[0].path 一致。
+            - name: srv
+              mountPath: /srv
+            # sqlite 資料庫 + 快取（RWO），對應 02-pvc.yaml 的 filebrowser-db，
+            # 路徑跟 03-configmap.yaml 的 server.database/cacheDir 一致。
+            - name: db
+              mountPath: /home/filebrowser/data
+            # 用 subPath 把 ConfigMap 裡的 config.yaml 這「一個檔案」疊到
+            # filebrowser-db 這顆 PVC 裡的同一路徑上，而不是把整個目錄換成
+            # ConfigMap（那樣會蓋掉 sqlite 資料庫檔案）。這是繞開這個
+            # image entrypoint 只認固定路徑的解法，細節見上方檔頭。
+            - name: config
+              mountPath: /home/filebrowser/data/config.yaml
+              subPath: config.yaml
+              # 設定檔不需要、也不應該被容器內程序改寫。
+              readOnly: true
+      securityContext:
+        # Pod 層級：兩顆 PVC 掛進來的檔案會被強制改成這個 group 擁有，
+        # 讓非 root 使用者也能讀寫。
+        fsGroup: 1000
+      volumes:
+        - name: srv
+          persistentVolumeClaim:
+            claimName: filebrowser-srv
+        - name: db
+          persistentVolumeClaim:
+            claimName: filebrowser-db
+        - name: config
+          configMap:
+            name: filebrowser-config
+---
+# Step 6：建立 ClusterIP Service，作為 Pod 的穩定進入點
+# 教學重點：Pod 會因為重啟（尤其這裡的 strategy: Recreate）而換 IP，
+# Service 透過 label selector 提供一個穩定的虛擬 IP + DNS 名稱
+# （filebrowser.filebrowser.svc.cluster.local，也是 03-configmap.yaml
+# 的 server.internalUrl 指到的目標）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: filebrowser
+  namespace: filebrowser
+  labels:
+    app: filebrowser
+spec:
+  # ClusterIP：只給叢集內部使用的虛擬 IP（預設類型）。對外曝露交給
+  # 下一步的 HTTPRoute，不需要也不應該在這裡開 NodePort/LoadBalancer。
+  type: ClusterIP
+  # 只有帶這個 label 的 Pod，才會被收進這個 Service 的 Endpoints。
+  selector:
+    app: filebrowser
+  ports:
+    - name: http
+      # Service 自己對外（叢集內）曝露的 port。
+      port: 80
+      # 實際轉送到 Pod 的哪個 port；用名稱 http 對應 Deployment 裡
+      # containerPort 宣告的 name，不用寫死數字。
+      targetPort: http
+---
+# Step 7：對外曝露服務
+# 教學重點：跟 draw.io 用同一顆 dev-gateway（Gateway API / Cilium），
+# 細節說明見 ../../draw.io/manifest/04-httproute.yaml；差別只在
+# hostnames 換成本產品自己的網域，靠 Host header 在同一個 Gateway
+# 上分流到不同 namespace 的 Service。
+#
+# 前置條件：先套用 ../../shared-infra/00-dev-gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: filebrowser
+  namespace: filebrowser
+spec:
+  # 這個 HTTPRoute 要掛到哪個/哪些 Gateway 的哪個 listener 上；
+  # 兩筆都掛代表 http 跟 https 的流量都會被導進來。
+  parentRefs:
+    - name: dev-gateway
+      namespace: default
+      sectionName: http
+    - name: dev-gateway
+      namespace: default
+      sectionName: https
+  # 只有帶這個 Host header 進來的請求才會被這條 Route 接手
+  # （同一個 Gateway 可以同時掛很多產品，靠 hostname 分流）。
+  hostnames:
+    - "filebrowser.nexai.org.com"
+  rules:
+    - matches:
+        - path:
+            # PathPrefix + "/"：符合所有路徑，全部導向這個產品。
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 實際轉送到哪個 Service、哪個 port（對應 05-service.yaml）。
+        - name: filebrowser
+          port: 80
+---
+# Step 8（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 同 draw.io 的做法，細節說明見 draw.io/manifest/06-networkpolicy.yaml。
+# 換成 FileBrowser Quantum 後多一條 egress 規則：filebrowser 要主動呼叫
+# onlyoffice namespace 的 Document Server 才能做 OnlyOffice 整合，寫法
+# 跟 cloudbeaver 連到 flarum/planka/peertube 資料庫的模式一致，見
+# ../../cloudbeaver/manifest/06-networkpolicy.yaml。onlyoffice 那邊的
+# `allow-ingress-from-gateway` 規則本來就是開放所有來源（`from: []`），
+# 不需要額外幫 onlyoffice 加規則。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: filebrowser
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-gateway
+  namespace: filebrowser
+spec:
+  # 只對帶 app: filebrowser 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: filebrowser
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但下面仍限制只開放 80 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: filebrowser
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-filebrowser-to-onlyoffice
+  namespace: filebrowser
+spec:
+  # 只有帶 app: filebrowser 這個 label 的 Pod 需要主動連出去呼叫
+  # OnlyOffice Document Server（做整合設定查詢等），其他 Pod 不受影響。
+  podSelector:
+    matchLabels:
+      app: filebrowser
+  policyTypes:
+    - Egress
+  egress:
+    # 用 namespaceSelector 比對 kubernetes.io/metadata.name（K8s 內建
+    # 幫每個 namespace 自動加上的 label），只放行連到 onlyoffice
+    # 這一個 namespace，比 namespaceSelector: {} 精準很多。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: onlyoffice
+      ports:
+        # 只開 onlyoffice 的 Service port（80），不是任意 port。
+        - protocol: TCP
+          port: 80

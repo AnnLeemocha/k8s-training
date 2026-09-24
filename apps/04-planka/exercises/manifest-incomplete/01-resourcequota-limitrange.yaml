@@ -1,0 +1,53 @@
+# Step 2：資源配額與預設值
+# 這個 namespace 同時裝了 PostgreSQL 跟 Planka 本體，配額要涵蓋兩者。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: planka-quota
+  namespace: planka
+spec:
+  hard:
+    # requests.* 是「整個 namespace 承諾要保留給它的資源總和上限」——
+    # 排程器會用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: __FILL_ME_3__
+    requests.memory: 1.5Gi
+    # limits.* 是「整個 namespace 所有容器最多能吃到的資源總和上限」，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "2"
+    limits.memory: 3Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod（postgres 1 個 + planka
+    # 應用若干個，這裡留了一些餘裕給滾動更新時多出來的 Pod）。
+    pods: "6"
+    # postgres 的 volumeClaimTemplates 跟 planka 的上傳資料 PVC 都算在內，
+    # 避免忘記設定而不小心建立過多 PVC 把儲存空間吃光。
+    persistentvolumeclaims: "6"
+    # 所有 PVC 的 storage request 總和上限，要涵蓋 postgres 的資料卷
+    # 跟 planka 上傳檔案的資料卷。
+    requests.storage: 20Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: planka-limitrange
+  namespace: planka
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 250m
+        memory: 512Mi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      # max：單一容器允許申請的資源上限，就算 Pod 自己寫了更高的
+      # requests/limits 也會被這裡的值擋下來（apply 會直接失敗）。
+      max:
+        cpu: __FILL_ME_4__
+        memory: 1Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 50m
+        memory: __FILL_ME_5__

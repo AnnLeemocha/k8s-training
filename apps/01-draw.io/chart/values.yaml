@@ -1,0 +1,116 @@
+# draw.io Helm Chart 預設值
+# 教學重點：Helm 把「拆散在好幾支 yaml 裡的重複設定」（名稱、image tag、
+# 資源量、hostname...）集中到一份 values.yaml，用 {{ .Values.xxx }}
+# 樣板化到各個 template。適合在教完純 yaml 版本後，講解「同一套邏輯
+# 換一種管理方式」的差異與取捨。
+#
+# 注意：namespace 不由這個 chart 建立（避免 Helm 對 Namespace 資源的
+# ownership 問題），請先手動建立或套用 ../manifest/00-namespace.yaml，
+# 再用 `helm install drawio ./chart -n drawio` 安裝。
+#
+# 下面每個欄位都標註「哪個 template 會用到」，方便對照 templates/ 底下
+# 的檔案；改完數字可以用 `helm template drawio ./chart -n drawio` 先看
+# 渲染結果，再 `helm upgrade` 套用。
+
+# Deployment 的副本數（templates/deployment.yaml 的 spec.replicas）。
+# 因為下面有啟用 hpa，實際數量會被 HPA 依 CPU 使用率在
+# hpa.minReplicas ~ hpa.maxReplicas 之間動態調整，這裡的值只是初始值。
+replicaCount: 2
+
+# 容器使用的映像檔（templates/deployment.yaml 的 spec.template.spec.containers[0].image）。
+image:
+  repository: jgraph/drawio
+  tag: "24.7.17"
+  pullPolicy: IfNotPresent
+
+# 容器對外監聽的 port，同時是 containerPort、livenessProbe/readinessProbe
+# 探測的 port，也是 NetworkPolicy（templates/networkpolicy.yaml）允許
+# ingress 流量進來的 port，三處共用同一個值，改這裡即可全部同步。
+containerPort: 8080
+
+# 單一容器的資源請求/上限（templates/deployment.yaml），必須落在下面
+# limitRange.min ~ limitRange.max 之間，且乘上 replicaCount（或 HPA 開到
+# maxReplicas）後的加總不能超過 resourceQuota。CPU 是可壓縮資源可以抓
+# 寬鬆的緩衝倍數，Memory 不可壓縮（超過會被 OOMKilled）建議抓保守一點，
+# 詳細判斷方法見 ../../docs/resources/README.md。
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Namespace 層級的總量配額（templates/resourcequota.yaml），限制這個
+# namespace 裡「所有 Pod 加總」最多能用多少。enabled: false 可以整個關掉
+# 這個資源方便教學對照。pods 要留給 HPA 擴到 maxReplicas 時的空間。
+resourceQuota:
+  enabled: true
+  requestsCpu: "1"
+  requestsMemory: 1Gi
+  limitsCpu: "2"
+  limitsMemory: 2Gi
+  pods: "10"
+
+# Namespace 層級「單一容器」的地板/天花板（templates/resourcequota.yaml
+# 裡的 LimitRange 物件）。max 必須 ≥ resources.limits，min 必須
+# ≤ resources.requests，否則 Pod 會被直接擋掉、連 Pending 都排不進去。
+# default/defaultRequest 是使用者忘記填 requests/limits 時的自動預設值。
+limitRange:
+  enabled: true
+  default:
+    cpu: 250m
+    memory: 256Mi
+  defaultRequest:
+    cpu: 100m
+    memory: 128Mi
+  max:
+    cpu: "1"
+    memory: 1Gi
+  min:
+    cpu: 50m
+    memory: 64Mi
+
+# ClusterIP Service 對外曝露的 port（templates/service.yaml），流量進來
+# 後轉給 containerPort。對外一律靠下面的 Gateway/HTTPRoute，這個 Service
+# 本身不需要是 NodePort/LoadBalancer。
+service:
+  port: 80
+
+# HTTPRoute 要掛到哪個 Gateway（templates/httproute.yaml 的
+# spec.parentRefs）。這座叢集用 Gateway API（Cilium）取代傳統 Ingress，
+# dev-gateway 是專門給這個教學課程用的共用 Gateway（定義在
+# ../../shared-infra/00-dev-gateway.yaml），不要改成正式環境的
+# app-gateway/admin-gateway。sectionNames 對應 dev-gateway 上開的
+# http/https 兩個 listener，兩個都掛表示這條路由同時吃 HTTP 跟 HTTPS。
+gateway:
+  name: dev-gateway
+  namespace: default
+  sectionNames:
+    - http
+    - https
+
+# HTTPRoute 用來比對請求 Host header 的網域（templates/httproute.yaml 的
+# spec.hostnames）。要能連進來，DNS 或學員筆電的 hosts 檔必須指向
+# dev-gateway 的 EXTERNAL-IP。
+hostnames:
+  - drawio.nexai.org.com
+
+# HorizontalPodAutoscaler（templates/hpa.yaml）。這是全教材唯一啟用 HPA
+# 的產品，enabled: false 可以整個關掉這個資源改回固定 replicaCount。
+# targetCPUUtilizationPercentage 是以 resources.requests.cpu 為基準的
+# 使用率百分比，不是絕對數值。
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+# NetworkPolicy（templates/networkpolicy.yaml）：先 default-deny 擋掉
+# 這個 namespace 所有進出流量，再開兩條白名單——allow ingress 到
+# containerPort（給 Gateway/Cilium 轉進來的流量用）、allow egress
+# DNS（udp/tcp 53，否則連叢集內部服務發現都會失敗）。
+# enabled: false 可以整個關掉方便對照「有/沒有 NetworkPolicy」的行為
+# 差異；正式上課前務必先實測連線。
+networkPolicy:
+  enabled: true

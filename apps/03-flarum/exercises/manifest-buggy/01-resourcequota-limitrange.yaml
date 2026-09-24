@@ -1,0 +1,58 @@
+# Step 2：資源配額與預設值
+# 教學重點：這份配額同時要容納 flarum 應用程式本身，以及併進來的 mysql
+# StatefulSet（見 02~04 號檔案）——數字是兩邊原本各自配額的合併/調整版，
+# LimitRange 的 max 尤其要注意：mysql 官方 image 建議的 limit（cpu 1 顆、
+# 記憶體 1Gi）比原本 flarum 單獨用的上限（cpu 500m）還高，沒調高 max
+# 的話，mysql 的 Pod 會直接被 API server 擋掉建立不了。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: flarum-quota
+  namespace: flarum
+spec:
+  hard:
+    # requests.* 是整個 namespace 承諾要保留給它的資源總和上限——
+    # 排程器用這個數字保證有節點容量，不是實際用量。
+    requests.cpu: "750m"
+    requests.memory: 1Gi
+    # limits.* 是整個 namespace 所有容器最多能吃到的資源總和上限，
+    # 是實際執行時的封頂值，超過會被 OOMKilled（記憶體）或被限流（CPU）。
+    limits.cpu: "2"
+    limits.memory: 3Gi
+    # 這個 namespace 裡最多能同時存在幾個 Pod（flarum + mysql 兩個工作負載）。
+    pods: "5"
+    # 限制這個 namespace 最多能建立幾顆 PVC——這裡有 flarum-storage、
+    # flarum-assets、mysql 的 volumeClaimTemplates 共 3 顆在用，留一點餘裕。
+    persistentvolumeclaims: "4"
+    # 所有 PVC 的 storage request 加總上限，避免忘記調整就把底層
+    # rook-ceph 存儲池吃光。
+    requests.storage: 20Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: flarum-limitrange
+  namespace: flarum
+spec:
+  limits:
+    - type: Container
+      # default：容器沒寫 limits 時，K8s 自動補上的值。
+      default:
+        cpu: 250m
+        memory: 512Mi
+      # defaultRequest：容器沒寫 requests 時，K8s 自動補上的值。
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      # max：單一容器允許申請的資源上限。這裡刻意調到 cpu 1 顆、2Gi，
+      # 就是為了讓下面 04 號檔案 mysql StatefulSet 的 limits（cpu 1、
+      # memory 1Gi）能通過驗證——沒調高的話 mysql Pod 會直接被
+      # API server 拒絕建立。
+      max:
+        cpu: "1"
+        memory: 2Gi
+      # min：單一容器允許申請的資源下限，避免有人把 requests 設成 0
+      # 造成排程器誤判、把大量 Pod 塞進同一個節點。
+      min:
+        cpu: 50m
+        memory: 128Mi

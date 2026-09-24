@@ -1,0 +1,38 @@
+# Step 2：限制此 Namespace 可用的資源總量與單一容器預設值
+# 教學重點：跟其他產品一樣的慣例（見 docs/resources/README.md），即使這個
+# namespace 只跑幾個極輕量的 debug Pod，也維持「每個 namespace 都該有
+# ResourceQuota/LimitRange」的企業慣例，數字刻意抓得很小，反映這裡的真實
+# 用途（sleep 待命的小 Pod，不是應用程式）。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: rbac-demo-quota
+  namespace: rbac-demo
+spec:
+  hard:
+    requests.cpu: 200m
+    requests.memory: 256Mi
+    limits.cpu: 500m
+    limits.memory: 512Mi
+    pods: "10"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: rbac-demo-limitrange
+  namespace: rbac-demo
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 50m
+        memory: 64Mi
+      defaultRequest:
+        cpu: 20m
+        memory: 32Mi
+      max:
+        cpu: 200m
+        memory: 256Mi
+      min:
+        cpu: 10m
+        memory: 16Mi

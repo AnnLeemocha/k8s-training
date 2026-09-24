@@ -1,0 +1,21 @@
+# Step 8：PeerTube 影片與資料儲存
+# 用 RWO + rook-ceph-block：跟 filebrowser/flarum-assets 的 RWX 選擇
+# 不同，因為 PeerTube 這裡只跑 1 個 replica、沒有多 Pod 同時讀寫的
+# 需求，選 RWO 效能更好也更簡單——再次強調「RWO/RWX 看的是實際
+# 讀寫需求，不是看檔案種類」。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: peertube-storage
+  namespace: peertube
+spec:
+  # ReadWriteOnce：同時間只能給一個節點掛載讀寫，因為下面 09 的
+  # Deployment 只跑 1 個 replica，不需要多 Pod 同時讀寫同一份儲存。
+  accessModes:
+    - __FILL_ME_28__
+  storageClassName: __FILL_ME_27__
+  resources:
+    # 教學用容量，實際上 PeerTube 影片檔案很快就會超過這個大小，
+    # 正式環境要抓大很多。
+    requests:
+      storage: 10Gi

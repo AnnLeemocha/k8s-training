@@ -1,0 +1,131 @@
+# Step 10（進階、選用）：NetworkPolicy — 上課前請務必先實測
+# 教學重點：跟 planka 的 postgres 一樣，示範「同一個 namespace 內部的
+# 服務隔離」——mysql 只允許同 namespace 裡貼 app=flarum 標籤的 Pod
+# 連進來，其他 Pod（就算在同一個 namespace）一樣連不到。這是 mysql
+# 還是獨立產品時「跨 namespace namespaceSelector」寫法的對照組：
+# 併進同一個 namespace 後，改用 podSelector 做服務間的零信任隔離。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: flarum
+spec:
+  # 空的 podSelector：選中「這個 namespace 裡的所有 Pod」。
+  podSelector: {}
+  # 同時管制進站跟出站，但這個 policy 完全沒寫 ingress/egress 規則，
+  # 等於「全部擋下」——後面幾份 policy 再各自「補洞」開放必要流量。
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-flarum-from-gateway
+  namespace: flarum
+spec:
+  # 只對帶 app: flarum 這個 label 的 Pod 生效。
+  podSelector:
+    matchLabels:
+      app: flarum
+  policyTypes:
+    - Ingress
+  ingress:
+    # from: [] 代表「不限來源」（含叢集外經 Gateway 進來的流量），
+    # 但仍限制只開放 8888 這個 port，並非完全不設防。
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 8888
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-mysql-from-flarum
+  namespace: flarum
+spec:
+  # 只對帶 app: mysql 這個 label 的 Pod 生效（mysql 這一側的進站規則）。
+  podSelector:
+    matchLabels:
+      app: __FILL_ME_31__
+  policyTypes:
+    - Ingress
+  ingress:
+    # 只允許同 namespace 裡帶 app: flarum 標籤的 Pod 連進來——這是
+    # mysql 併進同一個 namespace 後改用 podSelector 做零信任隔離的寫法，
+    # 對照 mysql 還是獨立產品時得用 namespaceSelector 跨 namespace 白名單。
+    - from:
+        - podSelector:
+            matchLabels:
+              app: __FILL_ME_32__
+      ports:
+        - protocol: TCP
+          port: __FILL_ME_33__
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: flarum
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # namespaceSelector: {} 代表「允許連到任何 namespace」，但這裡只
+    # 開放 53 port（DNS），目的是讓 default-deny-all 生效後 Pod 仍然
+    # 能解析 Service 的 DNS 名稱，不會連內部服務發現都失效。
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-flarum-to-mysql
+  namespace: flarum
+spec:
+  # 這是上面 allow-ingress-to-mysql-from-flarum 的另一半——egress 跟
+  # ingress 是分開管制的，flarum 這一側也要單獨開通「可以連出去」，
+  # 光靠 mysql 那份 policy 允許進站是不夠的。
+  podSelector:
+    matchLabels:
+      app: __FILL_ME_34__
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: __FILL_ME_35__
+      ports:
+        - protocol: TCP
+          port: 3306
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-mysql-from-cloudbeaver
+  namespace: flarum
+spec:
+  podSelector:
+    matchLabels:
+      app: mysql
+  policyTypes:
+    - Ingress
+  ingress:
+    # 額外開放給 cloudbeaver 這個「跨 namespace」的資料庫管理工具連線
+    # （例如上課用來直接檢視/操作 mysql 資料表），用 namespaceSelector
+    # 比對該 Pod 所在 namespace 的內建標籤
+    # kubernetes.io/metadata.name，不需要額外手動貼標籤。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudbeaver
+      ports:
+        - protocol: TCP
+          port: 3306

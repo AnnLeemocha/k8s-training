@@ -1,0 +1,47 @@
+# =============================================================================
+# 09-daily-backup-verification / velero/schedule-daily-full.yaml
+# 每日全叢集備份 Schedule —— 線上 daily-full-backup 的「建議改良版」（不直接套用）。
+#
+# 線上現況（kubectl -n velero get schedules.velero.io daily-full-backup -o yaml）：
+#   schedule: 0 1 * * *、snapshotMoveData: true、ttl: 720h、
+#   沒有 includedNamespaces（= 全部）、沒有排除任何 namespace
+# 本檔差異：排除 kube-system / velero / rook-ceph 等「重建叢集時不該從備份還原」的
+# namespace（見 08-cluster-rebuild），以及 Event、VolumeSnapshot 這類還原沒意義的資源。
+#
+# 套用 = 修改線上排程（kubectl apply 會回報 configured），請講師確認後再做。
+#
+# 等價 CLI（新建時）：
+#   velero schedule create daily-full-backup --schedule="0 1 * * *" \
+#     --exclude-namespaces kube-system,kube-public,kube-node-lease,velero,rook-ceph \
+#     --snapshot-move-data --ttl 720h
+# =============================================================================
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-full-backup             # 產生的備份會叫 daily-full-backup-<UTC 時間戳>
+  namespace: velero
+spec:
+  schedule: "0 1 * * *"               # cron 格式，Velero server 時區（UTC）→ 台灣時間 09:00
+  # schedule: "CRON_TZ=Asia/Taipei 0 1 * * *"   # 想用台灣時間時可加 CRON_TZ 前綴
+  useOwnerReferencesInBackup: false   # true = 刪除 Schedule 時連帶刪除它產生的備份（危險，保持 false）
+  paused: false                       # true = 暫停排程（不刪除設定）
+  template:                           # 以下就是每次產生的 Backup 的 spec
+    includedNamespaces: ["*"]
+    excludedNamespaces:
+      - kube-system                   # kubeadm 重建
+      - kube-public
+      - kube-node-lease
+      - velero                        # ⚠️ 必須排除：否則備份會夾帶其他備份的 DataUpload 物件，
+                                      #    還原時同一個 PVC 有多筆上傳結果 → PV 資料還原失敗（本課實測）
+      - rook-ceph                     # 儲存系統，用 Rook 重建
+    excludedResources:
+      - volumesnapshots.snapshot.storage.k8s.io          # 暫時性的快照物件，還原沒有意義
+      - volumesnapshotcontents.snapshot.storage.k8s.io
+      - events
+      - events.events.k8s.io
+    snapshotVolumes: true
+    snapshotMoveData: true            # 一定要搬出叢集，否則叢集消失時 PV 資料也消失
+    storageLocation: default
+    ttl: 720h0m0s                     # 保留 30 天 → 同時最多約 30 份每日備份
+    csiSnapshotTimeout: 10m0s
+    itemOperationTimeout: 4h0m0s      # 全叢集 Data Mover 上傳上限；舊排程實測約 6 分鐘完成 1687 個物件

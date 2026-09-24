@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onlyoffice
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: onlyoffice
+    {{- include "onlyoffice.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: onlyoffice
+  template:
+    metadata:
+      labels:
+        app: onlyoffice
+    spec:
+      {{- with .Values.nodePlacement.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodePlacement.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: onlyoffice
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: JWT_ENABLED
+              value: {{ .Values.jwt.enabled | quote }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: onlyoffice-secret
+                  key: JWT_SECRET
+            - name: PLUGINS_ENABLED
+              value: {{ .Values.pluginsEnabled | quote }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/onlyoffice/Data
+            - name: log
+              mountPath: /var/log/onlyoffice
+            - name: lib
+              mountPath: /var/lib/onlyoffice
+      securityContext:
+        fsGroup: 102
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: onlyoffice-data
+        - name: log
+          emptyDir: {}
+        - name: lib
+          emptyDir: {}

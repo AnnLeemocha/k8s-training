@@ -1,0 +1,44 @@
+# Step 5（對照組 3：叢集範圍的權限）：ClusterRole + ClusterRoleBinding
+# 教學重點：Node/Namespace 這類資源本身就是「叢集範圍」（cluster-scoped，
+# 不屬於任何 namespace），Role 的 namespace 邊界天生就管不到它們——
+# 就算把 Step 4 的 Role 加上 nodes 權限也一樣無效，一定要用沒有
+# namespace 邊界的 ClusterRole。這裡刻意示範「叢集範圍的資源」用
+# ClusterRole 才能讀到，藉此跟 Step 4 的 Role 做對照。
+# ClusterRoleBinding 綁定的 ServiceAccount 本身仍然是某個 namespace
+# 底下的物件（這裡是 rbac-demo），只是它被授予的權限範圍是整個叢集。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-node-viewer
+  namespace: rbac-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-viewer
+  # ClusterRole 沒有 namespace 欄位——它本身就是叢集範圍的物件。
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-node-viewer-binding
+subjects:
+  - kind: ServiceAccount
+    name: cluster-node-viewer
+    namespace: rbac-demo
+roleRef:
+  # roleRef.kind 是 ClusterRole，才會是「叢集範圍」的綁定；
+  # 如果這裡改成 Role，效果就會退化成只在 rbac-demo namespace 內生效
+  # （RoleBinding 也可以 roleRef 一個 ClusterRole，那樣是另一種常見
+  # 組合：套用叢集預先定義好的權限樣板，但只在某個 namespace 內生效——
+  # 這裡刻意示範最單純的 ClusterRole + ClusterRoleBinding 全叢集組合）。
+  kind: ClusterRole
+  name: node-viewer
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,137 @@
+# planka Helm Chart 預設值
+# 注意：namespace 不由這個 chart 建立，請先手動建立或套用
+# ../manifest/00-namespace.yaml，再用
+# `helm install planka ./chart -n planka` 安裝。
+#
+# 下面每個欄位都標註「哪個 template 會用到」。這是 flarum（mysql）的
+# 對照組：postgres 同樣併進自己的 namespace/chart，但 planka 應用映像
+# 本身就以非 root 身分（node，uid 1000）啟動，不需要 initContainer，
+# 容器也能直接套用 capabilities.drop: [ALL] 這種完整硬化。
+
+# postgres StatefulSet（templates/postgres-statefulset.yaml）。官方
+# postgres image 的 entrypoint 需要用 root 身分自降權，所以 postgres
+# 容器本身不套用 capabilities.drop: [ALL]（跟下面 planka 應用容器不同）。
+postgres:
+  image:
+    repository: postgres
+    tag: "16.4-alpine"
+  # 寫進 templates/postgres-secret.yaml（POSTGRES_USER/POSTGRES_PASSWORD/
+  # POSTGRES_DB），同一份密碼也被 templates/planka-secret.yaml 拿去組
+  # DATABASE_URL（postgresql://user:password@postgres:5432/database）。
+  # password 刻意不含特殊符號，因為要直接內插進 DATABASE_URL 字串，含
+  # 特殊符號需要額外做 URL escape。注意：這組帳密只在 PVC 第一次 initdb
+  # 時套用，改密碼得先清空 PVC 才會生效。
+  auth:
+    user: "planka"
+    password: "TrainingPlanka123"   # 教學用明文，且刻意不含特殊符號（DATABASE_URL 組字串用）
+    database: "planka"
+  # postgres 資料目錄的 PVC（templates/postgres-statefulset.yaml 的
+  # volumeClaimTemplates），單寫用 rook-ceph-block（RWO）。PGDATA 指向
+  # 子目錄（避開 ext4 lost+found 佔用區塊導致 initdb 失敗的問題）。
+  persistence:
+    storageClassName: rook-ceph-block
+    size: 5Gi
+  # postgres 容器的資源請求/上限（templates/postgres-statefulset.yaml），
+  # 跟下面 planka.resources 一起算進 resourceQuota/limitRange。
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# Planka 應用本身（templates/planka-deployment.yaml）。
+planka:
+  # ghcr.io/plankanban/planka 映像的 Dockerfile 直接用非 root 的 USER
+  # node 啟動，不需要自降權，所以下面容器可以安全套用
+  # capabilities.drop: [ALL]（templates/planka-deployment.yaml 的
+  # securityContext），也不需要 initContainer 補目錄結構（Planka 自己
+  # 會在需要時建立上傳子目錄）。
+  # ghcr.io 在本叢集拉取速度明顯比 Docker Hub 慢（實測 5-15 分鐘），
+  # 正式上課前建議先在各節點預先 pull 過一次。
+  image:
+    repository: ghcr.io/plankanban/planka
+    tag: "latest"
+  # 寫進 templates/planka-deployment.yaml 的環境變數 BASE_URL，必須跟
+  # 下面 hostnames[0] 一致，否則 Planka 產生的內部連結網域會是錯的。
+  baseUrl: "http://planka.nexai.org.com"
+  # 寫進 templates/planka-secret.yaml 的 SECRET_KEY，Planka 用來加密
+  # session/cookie，跟資料庫密碼無關。
+  secretKey: "TrainingOnlySecretKey_ChangeMeInProduction"
+  # 寫進 templates/planka-secret.yaml（DEFAULT_ADMIN_PASSWORD）跟
+  # templates/planka-deployment.yaml 的其他 DEFAULT_ADMIN_* 環境變數，
+  # 只在資料庫是空的（第一次啟動）時用來建立管理員帳號。
+  admin:
+    email: "admin@example.com"
+    name: "K8s Training Admin"
+    username: "admin"
+    password: "TrainingAdmin123!"
+  # Planka 容器的資源請求/上限（templates/planka-deployment.yaml）。
+  resources:
+    requests:
+      cpu: 150m
+      memory: 384Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi
+  # Planka 上傳附件用的 PVC（templates/planka-deployment.yaml 掛到
+  # /app/data），用 rook-cephfs（RWX）——跟 flarum 的 assets PVC 同款
+  # 考量，預留未來多 replica 共享上傳檔案的可能性。
+  persistence:
+    storageClassName: rook-cephfs
+    size: 5Gi
+
+# Namespace 層級總量配額（templates/resourcequota.yaml）。這裡的數字要
+# 同時覆蓋 planka 應用跟 postgres 兩個 workload 的加總。
+resourceQuota:
+  enabled: true
+  requestsCpu: "1"
+  requestsMemory: 1.5Gi
+  limitsCpu: "2"
+  limitsMemory: 3Gi
+  pods: "6"
+  persistentVolumeClaims: "6"
+  requestsStorage: 20Gi
+
+# Namespace 層級單一容器的地板/天花板（templates/resourcequota.yaml 裡
+# 的 LimitRange）。max 必須 ≥ 兩者 resources.limits 較大的那個，min 必須
+# ≤ 兩者 resources.requests 較小的那個。
+limitRange:
+  enabled: true
+  default:
+    cpu: 250m
+    memory: 512Mi
+  defaultRequest:
+    cpu: 100m
+    memory: 256Mi
+  max:
+    cpu: "1"
+    memory: 1Gi
+  min:
+    cpu: 50m
+    memory: 128Mi
+
+# ClusterIP Service 對外曝露的 port（templates/planka-service.yaml），
+# 轉給 Planka 容器實際監聽的 containerPort 1337。
+service:
+  port: 80
+
+# HTTPRoute 掛的 Gateway（templates/httproute.yaml）。
+gateway:
+  name: dev-gateway
+  namespace: default
+  sectionNames:
+    - http
+    - https
+
+# HTTPRoute 比對 Host header 用的網域，必須跟上面 planka.baseUrl 一致。
+hostnames:
+  - planka.nexai.org.com
+
+# NetworkPolicy（templates/networkpolicy.yaml）：same-namespace
+# podSelector-to-podSelector 型範例，只允許 planka Pod 連到 postgres
+# Pod 的 5432、Gateway 連到 planka 的 1337，其餘一律擋掉——跟 flarum
+# 的 mysql NetworkPolicy 是完全對稱的寫法，適合放在一起對照教學。
+networkPolicy:
+  enabled: true
