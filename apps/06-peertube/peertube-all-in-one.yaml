@@ -5,9 +5,10 @@
 # 內容與 manifest/ 目錄逐檔內容完全一致。
 #
 # 前置條件：先套用共用的 ../shared-infra/00-dev-gateway.yaml
-# 注意：postgres/redis/peertube 三個 Pod 都用 nodeSelector 排到
-# gpu01（這座叢集其他節點記憶體吃緊），上課前請確認
-# `kubectl top node gpu01` 還有餘裕。
+# 注意：postgres/redis/peertube 三個 Pod 預設只加 toleration、不指定
+# 節點（nodeSelector 已註解保留），由 Scheduler 自行挑選；這座叢集
+# k8s01~03 記憶體吃緊，上課前請先 `kubectl top nodes` 確認資源，
+# 排不進去再取消註解把三個 Pod 釘到 gpu01。
 #
 # 用法：
 #   kubectl apply -f peertube-all-in-one.yaml
@@ -145,10 +146,12 @@ spec:
 ---
 # Step 5：PostgreSQL StatefulSet
 # 教學重點：
-#   - nodeSelector/toleration 排到 gpu01：延續 onlyoffice 的做法。
-#     這座叢集 k8s01~03 記憶體已經很緊繃，PeerTube 這組（postgres +
-#     redis + app 三個 Pod）乾脆整組都排到記憶體較寬裕的 gpu01，
-#     避免又把其他共用工作負載擠爆。
+#   - toleration 為主、不指定節點：延續 onlyoffice 的做法。
+#     三個 Pod（postgres + redis + app）都容忍 gpu01 的 GPU taint，
+#     讓 Scheduler「可以」把它們排到 gpu01，但不強制，由各節點剩餘
+#     資源決定落點。這座叢集 k8s01~03 記憶體已經很緊繃，若 Pod 卡在
+#     Pending（Insufficient memory），可取消註解 nodeSelector，把整組
+#     釘到記憶體較寬裕的 gpu01，避免又把其他共用工作負載擠爆。
 #   - 沿用 mysql/planka 學到的教訓：不 drop capabilities、PGDATA
 #     指到子目錄避開 lost+found 問題。
 #   - initdb ConfigMap：見 03-postgres-initdb-configmap.yaml。
@@ -173,12 +176,13 @@ spec:
       labels:
         app: postgres
     spec:
-      # 見上方教學重點：整組（postgres/redis/peertube）都刻意排到
-      # 記憶體較寬裕的 gpu01，避免擠爆其他共用工作負載。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
-      # gpu01 平常帶有 NoSchedule taint（保留給 GPU 工作負載），這裡要
-      # 明確容忍這個 taint，Pod 才排得上去。
+      # 見上方教學重點：預設不指定節點；若要整組（postgres/redis/
+      # peertube）釘到記憶體較寬裕的 gpu01，三個檔案的 nodeSelector
+      # 都要一起取消註解。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
+      # gpu01 平常帶有 NoSchedule taint（保留給 GPU 工作負載），這裡
+      # 容忍這個 taint，Pod 才「有資格」排上 gpu01（但不保證一定排過去）。
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -331,9 +335,10 @@ spec:
       labels:
         app: redis
     spec:
-      # 跟 postgres 排到同一台 gpu01，理由同 05-postgres-statefulset.yaml。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
+      # 排程設定同 05-postgres-statefulset.yaml：只容忍 gpu01 的 taint、
+      # 不指定節點；要釘到 gpu01 再取消註解 nodeSelector。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -453,7 +458,8 @@ spec:
 #     ——Gateway 在邊界做 TLS 終止，Pod 內部收到的永遠是明文 HTTP，
 #     但 PeerTube 產生的影片網址/ActivityPub 聯邦資訊要用外部看到的
 #     網址，這兩者搞混是這類「後面有反向代理」架構常見的錯誤來源。
-#   - nodeSelector/toleration 排到 gpu01，同 postgres/redis。
+#   - 排程同 postgres/redis：只加 toleration、不指定節點
+#     （nodeSelector 已註解保留）。
 #   - securityContext 沒有 drop capabilities（實測踩到的坑，跟
 #     mysql/redis 同一種教訓）：這個 image 的 entrypoint 一樣是以
 #     root 啟動、再切換到內部的 peertube 使用者，drop 掉 capabilities
@@ -484,9 +490,10 @@ spec:
       labels:
         app: peertube
     spec:
-      # 跟 postgres/redis 排到同一台 gpu01，理由同前。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
+      # 排程設定同 postgres/redis：只容忍 gpu01 的 taint、不指定節點；
+      # 要釘到 gpu01 再取消註解 nodeSelector。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

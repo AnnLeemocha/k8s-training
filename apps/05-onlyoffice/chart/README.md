@@ -2,8 +2,8 @@
 
 用 Helm 部署 [ONLYOFFICE Document Server](https://github.com/ONLYOFFICE/DocumentServer)，
 用官方「bundled-everything」映像（內建 Postgres/Redis/RabbitMQ），
-刻意不拆外部資料庫。全教材最重的產品，也是唯一需要釘死在 GPU 節點才有
-足夠記憶體的產品。對應的純 yaml 教學版本見
+刻意不拆外部資料庫。全教材最重的產品，預設用 toleration 允許排到記憶體
+較空的 GPU 節點（不指定節點，必要時可用 `nodeSelector` 釘死）。對應的純 yaml 教學版本見
 [`../manifest/`](../manifest/)。
 
 Chart 建立的資源（`templates/`）：Deployment、Service、HTTPRoute、
@@ -73,8 +73,8 @@ helm uninstall onlyoffice -n onlyoffice
 
 | 參數 | 說明 | 預設值 |
 |---|---|---|
-| `nodePlacement.nodeSelector` | 把 Pod 釘死在 `gpu01` 節點——`k8s01~03` 記憶體長期在 81-91% 使用率，扛不住這個產品的 requests | `kubernetes.io/hostname: gpu01` |
-| `nodePlacement.tolerations` | 對應 `gpu01` 的 `nvidia.com/gpu=true:NoSchedule` taint | `[{key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}]` |
+| `nodePlacement.nodeSelector` | 指定節點（預設不設，由 Scheduler 自行挑選）。`k8s01~03` 記憶體長期在 81-91% 使用率，若 Pod 因 requests 排不進去，可設 `kubernetes.io/hostname: gpu01` 釘死在 `gpu01` | 未設定（`values.yaml` 內註解保留 `kubernetes.io/hostname: gpu01`） |
+| `nodePlacement.tolerations` | 對應 `gpu01` 的 `nvidia.com/gpu=true:NoSchedule` taint，讓 Pod「可以」排到 `gpu01`（不強制） | `[{key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}]` |
 
 ### `service` / `gateway` / `hostnames` / `networkPolicy`
 
@@ -90,7 +90,9 @@ helm uninstall onlyoffice -n onlyoffice
 
 - `jwt.secret` 必須跟 [`../filebrowser`](../../filebrowser/) 產品的
   `onlyoffice.secret` 逐字一致；兩邊各自獨立部署，改動時要記得同步。
-- 這是唯一需要 `nodePlacement` 才排得進去的產品之一（跟 peertube
-  一樣），部署前先 `kubectl top nodes` 確認 `gpu01` 還有空間。
+- 預設只給 tolerations、不指定節點（跟 peertube 一樣），部署前先
+  `kubectl top nodes` 確認有節點塞得下；排不進去時用
+  `--set nodePlacement.nodeSelector."kubernetes\.io/hostname"=gpu01`
+  釘到 `gpu01`。
 - `pluginsEnabled: false` 是實測踩坑後的修正，不要因為「看起來像進階
   功能」而改回 `true`，除非已確認 NetworkPolicy 允許出網。

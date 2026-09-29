@@ -6,17 +6,22 @@
 # 下面每個欄位都標註「哪個 template 會用到」。這是全教材整合度最高的
 # 產品：PostgreSQL（StatefulSet+PVC）+ Redis（Deployment+emptyDir，
 # 刻意不用 PVC，示範「可接受資料遺失」跟「不可接受」兩種持久化策略的
-# 對照）+ PeerTube 本身，三個元件都釘在同一個 GPU 節點上。
+# 對照）+ PeerTube 本身，三個元件都容忍 GPU 節點的 taint（不指定節點）。
 
-# 把三個元件（postgres/redis/peertube）都釘在 gpu01 節點
+# 三個元件（postgres/redis/peertube）的排程設定
 # （templates/postgres.yaml、templates/redis.yaml、templates/peertube.yaml
-# 各自的 nodeSelector/tolerations）。本叢集 k8s01~03 記憶體長期在
-# 81-91% 使用率，這個產品的三個 workload 加總扛不住，只能放到記憶體較
-# 空但帶 nvidia.com/gpu=true:NoSchedule taint 的 gpu01，需要對應的
-# toleration 才排得進去。
+# 各自的 nodeSelector/tolerations）。預設只給 tolerations、不指定節點：
+# gpu01 帶有 nvidia.com/gpu=true:NoSchedule taint，加上對應的
+# toleration 代表「允許」排到 gpu01，但不「強制」——Scheduler 仍會依
+# 各節點剩餘資源自行挑選（k8s01~03 或 gpu01 都有可能）。
+#
+# nodeSelector 保留為註解參考：本叢集 k8s01~03 記憶體長期在 81-91%
+# 使用率，若 Pod 因 requests 排不進去（Pending, Insufficient memory），
+# 可取消註解把三個元件都釘死在記憶體較空的 gpu01。注意 toleration 只是
+# 「能容忍 taint」，要指定節點仍須搭配 nodeSelector（或 nodeAffinity）。
 nodePlacement:
-  nodeSelector:
-    kubernetes.io/hostname: gpu01
+  # nodeSelector:
+  #   kubernetes.io/hostname: gpu01
   tolerations:
     - key: nvidia.com/gpu
       operator: Equal

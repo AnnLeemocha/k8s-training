@@ -253,7 +253,7 @@ maxReplicas 公式 ≈ ceil(預期尖峰同時在線人數 ÷ 單 Pod 容量邊�
 - **需要 metrics-server**（本叢集已確認可用），否則 `kubectl top pod`
   沒有資料，第 3 段報告會是空的。
 - **測試會對叢集帶來額外負載**，避免在上課尖峰時段對本來就吃重的產品
-  （例如已經 pin 在 `gpu01` 的 onlyoffice、peertube）加測，或先跟其他
+  （例如 onlyoffice、peertube）加測，或先跟其他
   同時在用叢集的人協調一下時間。
 - 建議值只是「這次測試流量模式」下量出來的參考，不是絕對答案；改變
   `START_VUS`/`STEP_VUS`/`STEP_DURATION` 會量到不同的曲線，最終數字仍

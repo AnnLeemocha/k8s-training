@@ -1,15 +1,17 @@
 # Step 5：部署 ONLYOFFICE Document Server
 # 教學重點：
-#   - nodeSelector + tolerations：這座叢集記憶體最緊繃的三個節點
-#     （k8s01~03）目前實際使用率已經 81~85%，這個 image 官方建議
-#     至少 2 CPU / 4GB，硬排上去有把整個節點壓到記憶體不足、
-#     波及其他共用工作負載（Rancher/Ceph/Velero 也在同一群集）的風險。
-#     `gpu01` 目前記憶體用量最低（~24%），但它本身有
+#   - tolerations（nodeSelector 已註解保留）：`gpu01` 有
 #     `nvidia.com/gpu=true:NoSchedule` 的 taint（保留給要用 GPU 的
-#     工作負載），所以這裡明確用 nodeSelector 指定排到 gpu01，
-#     並加上對應的 toleration 讓排程器願意把這個「不需要 GPU」的
-#     Pod 排過去。這是「資源規劃要看實際叢集狀況，不能只套教科書
-#     建議值」的活教材。
+#     工作負載），沒有對應的 toleration，這個「不需要 GPU」的 Pod
+#     永遠不會被排過去。這裡只加 toleration、不指定節點，代表「允許」
+#     排到 gpu01 但不「強制」——Scheduler 會依各節點剩餘資源自行挑選
+#     （k8s01~03 或 gpu01 都有可能）。
+#     toleration 只是「能容忍 taint」，不會把 Pod 吸過去；要指定節點
+#     仍須搭配 nodeSelector（或 nodeAffinity）。這座叢集 k8s01~03 記憶體
+#     使用率常在 81~85%，這個 image 官方建議至少 2 CPU / 4GB，若 Pod
+#     卡在 Pending（Insufficient memory），可取消註解 nodeSelector，
+#     把它釘到記憶體較空的 gpu01（~24%）。這是「資源規劃要看實際
+#     叢集狀況，不能只套教科書建議值」的活教材。
 #   - securityContext 沒有做任何限制：這個 image 用 supervisor 同時管理
 #     內建的 nginx / docservice / postgres / redis / rabbitmq 好幾個
 #     系統服務，root 層級的 supervisor 需要對這些子服務做使用者切換
@@ -52,12 +54,13 @@ spec:
       labels:
         app: onlyoffice
     spec:
-      # 指定排到哪個節點：這裡的值要對應叢集實際節點名稱
+      # 指定排到哪個節點（預設註解、不指定，由 Scheduler 自行挑選）：
+      # 要釘到特定節點時才取消註解，值要對應叢集實際節點名稱
       # （可用 `kubectl get nodes` 確認），詳細原因見檔頭說明。
-      nodeSelector:
-        kubernetes.io/hostname: __FILL_ME_9__
+      # nodeSelector:
+      #   kubernetes.io/hostname: __FILL_ME_9__
       # 容忍 gpu01 節點上「保留給 GPU 工作負載」的 taint，讓排程器
-      # 願意把這個完全不需要 GPU 的 Pod 排過去（見檔頭說明）。
+      # 「可以」把這個完全不需要 GPU 的 Pod 排過去（見檔頭說明）。
       # operator/value/effect 必須跟節點實際的 taint 完全對應，
       # 否則容忍不會生效、Pod 會一直卡在 Pending。
       tolerations:

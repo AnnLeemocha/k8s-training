@@ -1,6 +1,6 @@
 apiVersion: v2
 name: onlyoffice
-description: ONLYOFFICE Document Server — K8s 教育訓練用 Helm Chart（高資源需求、nodeSelector/toleration 排程示範）
+description: ONLYOFFICE Document Server — K8s 教育訓練用 Helm Chart（高資源需求、toleration 排程示範）
 type: application
 version: 0.1.0
 appVersion: "latest"

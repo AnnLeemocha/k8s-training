@@ -223,8 +223,8 @@ helm uninstall <release-name> -n <namespace>
 | filebrowser | 1 | `replicaCount` 固定 1；兩個 PVC（RWX 檔案 + RWO db）示範 StorageClass 取捨；`onlyoffice.*` 跨產品整合設定 | [`filebrowser/chart/README.md`](../../filebrowser/chart/README.md) |
 | flarum | 2（app + mysql） | `mysql.*` 整組併在同一個 chart 裡；`db.host` 用同 namespace 短名稱；`forum.adminPassword` 明文但 mysql 密碼靠 `secretKeyRef` 互相引用不重複填 | [`flarum/chart/README.md`](../../flarum/chart/README.md) |
 | planka | 2（app + postgres） | 跟 flarum 對稱但相反的容器安全模型：app 映像非 root，可以 `capabilities.drop: [ALL]`，不需要 initContainer | [`planka/chart/README.md`](../../planka/chart/README.md) |
-| onlyoffice | 1（bundled-everything） | `nodePlacement.*` 釘死 GPU 節點；`pluginsEnabled: false` 避開背景行程在受限網路下無限重試的坑 | [`onlyoffice/chart/README.md`](../../onlyoffice/chart/README.md) |
-| peertube | 3（app + postgres + redis） | 全教材整合度最高；`redis` 刻意用 emptyDir 不用 PVC，跟 `postgres` 的 PVC 做持久化策略對照；三個元件都 `nodePlacement` 到同一個 GPU 節點 | [`peertube/chart/README.md`](../../peertube/chart/README.md) |
+| onlyoffice | 1（bundled-everything） | `nodePlacement.tolerations` 允許排到 GPU 節點（`nodeSelector` 預設不設）；`pluginsEnabled: false` 避開背景行程在受限網路下無限重試的坑 | [`onlyoffice/chart/README.md`](../../onlyoffice/chart/README.md) |
+| peertube | 3（app + postgres + redis） | 全教材整合度最高；`redis` 刻意用 emptyDir 不用 PVC，跟 `postgres` 的 PVC 做持久化策略對照；三個元件共用 `nodePlacement`，預設只容忍 GPU 節點 taint、不指定節點 | [`peertube/chart/README.md`](../../peertube/chart/README.md) |
 | cloudbeaver | 1（跨 namespace 用戶端） | 唯一用 `networkPolicy.databaseTargets` 陣列 `range` 展開多筆跨 namespace 規則，示範「資料驅動」的模板寫法 | [`cloudbeaver/chart/README.md`](../../cloudbeaver/chart/README.md) |
 
 **教學建議順序**：draw.io（最單純）→ filebrowser（第一個 PVC）→

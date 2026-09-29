@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hpa-demo-load
+  namespace: drawio
+spec:
+  activeDeadlineSeconds: 300
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              for i in $(seq 1 30); do
+                (while true; do curl -s -o /dev/null http://drawio.drawio.svc.cluster.local/js/app.min.js; done) &
+              done
+              wait

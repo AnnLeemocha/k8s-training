@@ -10,7 +10,8 @@
 #     ——Gateway 在邊界做 TLS 終止，Pod 內部收到的永遠是明文 HTTP，
 #     但 PeerTube 產生的影片網址/ActivityPub 聯邦資訊要用外部看到的
 #     網址，這兩者搞混是這類「後面有反向代理」架構常見的錯誤來源。
-#   - nodeSelector/toleration 排到 gpu01，同 postgres/redis。
+#   - 排程同 postgres/redis：只加 toleration、不指定節點
+#     （nodeSelector 已註解保留）。
 #   - securityContext 沒有 drop capabilities（實測踩到的坑，跟
 #     mysql/redis 同一種教訓）：這個 image 的 entrypoint 一樣是以
 #     root 啟動、再切換到內部的 peertube 使用者，drop 掉 capabilities
@@ -41,9 +42,10 @@ spec:
       labels:
         app: peertube
     spec:
-      # 跟 postgres/redis 排到同一台 gpu01，理由同前。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
+      # 排程設定同 postgres/redis：只容忍 gpu01 的 taint、不指定節點；
+      # 要釘到 gpu01 再取消註解 nodeSelector。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

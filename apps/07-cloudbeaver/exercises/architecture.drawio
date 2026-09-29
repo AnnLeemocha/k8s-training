@@ -1,156 +1,153 @@
-<mxfile host="app.diagrams.net" modified="2026-09-22T00:00:00.000Z" agent="k8s-training" version="24.7.17" type="device">
+<mxfile host="app.diagrams.net" agent="k8s-training">
   <diagram id="cloudbeaver-arch" name="cloudbeaver K8s Architecture">
-    <mxGraphModel dx="1600" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1650" pageHeight="1150" math="0" shadow="0">
+    <mxGraphModel dx="610" dy="348" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1650" pageHeight="1150" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-
-        <!-- Client -->
-        <mxCell id="client" value="學員瀏覽器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-          <mxGeometry x="40" y="400" width="140" height="60" as="geometry" />
+        <mxCell id="evORn6jYbcBJ4nTvhkja-3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=light-dark(#A8CCFC,#507BAD);strokeColor=#999999;dashed=1;fontStyle=1;opacity=30;" value="K8S Cluster" vertex="1">
+          <mxGeometry height="980" width="1440" x="190" y="80" as="geometry" />
         </mxCell>
-
-        <!-- default namespace group (shared-infra) -->
-        <mxCell id="nsDefault" value="namespace: default (shared-infra)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="260" y="360" width="220" height="140" as="geometry" />
+        <mxCell id="client" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="學員瀏覽器" vertex="1">
+          <mxGeometry height="60" width="140" x="20" y="500" as="geometry" />
         </mxCell>
-        <mxCell id="gateway" value="dev-gateway&#10;(Gateway API / Cilium)&#10;http :80 + https :443" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
-          <mxGeometry x="285" y="400" width="170" height="70" as="geometry" />
+        <mxCell id="nsDefault" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=light-dark(#A8CCFC,#507BAD);strokeColor=light-dark(#595858,#EDEDED);dashed=1;fontStyle=1;opacity=30;strokeWidth=2;" value="namespace: default (shared-infra)" vertex="1">
+          <mxGeometry height="140" width="220" x="240" y="315" as="geometry" />
         </mxCell>
-
-        <!-- cloudbeaver namespace group -->
-        <mxCell id="nsCloudbeaver" value="namespace: cloudbeaver（CROSS-NAMESPACE CLIENT）" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="560" y="40" width="700" height="620" as="geometry" />
+        <mxCell id="gateway" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="dev-gateway&#xa;(Gateway API / Cilium)&#xa;http :80 + https :443" vertex="1">
+          <mxGeometry height="70" width="170" x="265" y="355" as="geometry" />
         </mxCell>
-
-        <mxCell id="rq" value="ResourceQuota + LimitRange&#10;(namespace 資源治理)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" vertex="1" parent="1">
-          <mxGeometry x="590" y="80" width="220" height="60" as="geometry" />
+        <mxCell id="nsCloudbeaver" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=light-dark(#A8CCFC,#507BAD);strokeColor=light-dark(#595858,#EDEDED);dashed=1;fontStyle=1;opacity=30;strokeWidth=2;" value="namespace: cloudbeaver（CROSS-NAMESPACE CLIENT）" vertex="1">
+          <mxGeometry height="620" width="850" x="540" y="130" as="geometry" />
         </mxCell>
-
-        <mxCell id="route" value="HTTPRoute: cloudbeaver&#10;host: cloudbeaver.nexai.org.com" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
-          <mxGeometry x="590" y="400" width="190" height="60" as="geometry" />
+        <mxCell id="rq" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" value="ResourceQuota + LimitRange&#xa;(namespace 資源治理)" vertex="1">
+          <mxGeometry height="60" width="220" x="590" y="180" as="geometry" />
         </mxCell>
-
-        <mxCell id="svc" value="Service: cloudbeaver&#10;ClusterIP :80 -&gt; :8978" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
-          <mxGeometry x="850" y="400" width="190" height="60" as="geometry" />
+        <mxCell id="route" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="HTTPRoute: cloudbeaver&#xa;host: cloudbeaver.nexai.org.com" vertex="1">
+          <mxGeometry height="60" width="190" x="590" y="360" as="geometry" />
         </mxCell>
-
-        <mxCell id="deploy" value="Deployment: cloudbeaver (replicas=1)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f8f8f8;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="1110" y="200" width="220" height="140" as="geometry" />
+        <mxCell id="svc" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Service: cloudbeaver&#xa;ClusterIP :80 -&gt; :8978" vertex="1">
+          <mxGeometry height="60" width="190" x="590" y="505" as="geometry" />
         </mxCell>
-        <mxCell id="pod1" value="Pod&#10;dbeaver/cloudbeaver:latest&#10;:8978&#10;（無 capabilities.drop，root entrypoint chown 後降權）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-          <mxGeometry x="1130" y="240" width="180" height="90" as="geometry" />
+        <mxCell id="deploy" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f8f8f8;strokeColor=#666666;fontStyle=1;" value="Deployment: cloudbeaver (replicas=1)" vertex="1">
+          <mxGeometry height="170" width="240" x="1100" y="300" as="geometry" />
         </mxCell>
-
-        <mxCell id="pvc" value="PVC: cloudbeaver-workspace&#10;RWO 2Gi（帳號/連線設定持久化）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
-          <mxGeometry x="1110" y="400" width="220" height="70" as="geometry" />
+        <mxCell id="pod1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="Pod&#xa;dbeaver/cloudbeaver:latest&#xa;:8978&#xa;（無 capabilities.drop，root entrypoint chown 後降權）" vertex="1">
+          <mxGeometry height="90" width="180" x="1120" y="340" as="geometry" />
         </mxCell>
-
-        <mxCell id="np" value="NetworkPolicy&#10;default-deny + 放行 Gateway ingress / DNS egress&#10;+ egress 3 條 namespaceSelector 規則（下方）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
-          <mxGeometry x="590" y="530" width="740" height="70" as="geometry" />
+        <mxCell id="pvc" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="PVC: cloudbeaver-workspace&#xa;RWO 2Gi（帳號/連線設定持久化）" vertex="1">
+          <mxGeometry height="70" width="220" x="810" y="285" as="geometry" />
         </mxCell>
-
-        <!-- flarum namespace group -->
-        <mxCell id="nsFlarum" value="namespace: flarum" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="60" y="760" width="280" height="160" as="geometry" />
+        <mxCell id="np" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" value="NetworkPolicy&lt;br&gt;default-deny + 放行 Gateway ingress / DNS egress&lt;br&gt;+ egress 3 條 namespaceSelector 規則（下方）&lt;div&gt;&lt;br&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="80" width="720" x="610" y="620" as="geometry" />
         </mxCell>
-        <mxCell id="svcMysql" value="Service: mysql&#10;flarum.svc.cluster.local:3306&#10;（colocated MySQL 8.0）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
-          <mxGeometry x="90" y="810" width="220" height="80" as="geometry" />
+        <mxCell id="nsFlarum" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=light-dark(#A8CCFC,#507BAD);strokeColor=light-dark(#595858,#EDEDED);dashed=1;fontStyle=1;opacity=30;strokeWidth=2;" value="namespace: flarum" vertex="1">
+          <mxGeometry height="160" width="280" x="220" y="860" as="geometry" />
         </mxCell>
-
-        <!-- planka namespace group -->
-        <mxCell id="nsPlanka" value="namespace: planka" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="380" y="760" width="280" height="160" as="geometry" />
+        <mxCell id="svcMysql" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Service: mysql&#xa;flarum.svc.cluster.local:3306&#xa;（colocated MySQL 8.0）" vertex="1">
+          <mxGeometry height="80" width="220" x="250" y="910" as="geometry" />
         </mxCell>
-        <mxCell id="svcPlanka" value="Service: postgres&#10;planka.svc.cluster.local:5432&#10;（colocated PostgreSQL 16）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
-          <mxGeometry x="410" y="810" width="220" height="80" as="geometry" />
+        <mxCell id="nsPlanka" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=light-dark(#A8CCFC,#507BAD);strokeColor=light-dark(#595858,#EDEDED);dashed=1;fontStyle=1;opacity=30;strokeWidth=2;" value="namespace: planka" vertex="1">
+          <mxGeometry height="160" width="280" x="540" y="860" as="geometry" />
         </mxCell>
-
-        <!-- peertube namespace group -->
-        <mxCell id="nsPeertube" value="namespace: peertube" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=none;strokeColor=#999999;dashed=1;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="700" y="760" width="280" height="160" as="geometry" />
+        <mxCell id="svcPlanka" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Service: postgres&#xa;planka.svc.cluster.local:5432&#xa;（colocated PostgreSQL 16）" vertex="1">
+          <mxGeometry height="80" width="220" x="570" y="910" as="geometry" />
         </mxCell>
-        <mxCell id="svcPeertube" value="Service: postgres&#10;peertube.svc.cluster.local:5432&#10;（dedicated PostgreSQL 16）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
-          <mxGeometry x="730" y="810" width="220" height="80" as="geometry" />
+        <mxCell id="nsPeertube" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=light-dark(#A8CCFC,#507BAD);strokeColor=light-dark(#595858,#EDEDED);dashed=1;fontStyle=1;opacity=30;strokeWidth=2;" value="namespace: peertube" vertex="1">
+          <mxGeometry height="160" width="280" x="860" y="860" as="geometry" />
         </mxCell>
-
-        <!-- legend -->
-        <mxCell id="legend" value="紅色虛線＝跨 namespace egress（NetworkPolicy namespaceSelector 放行，目標 namespace 各自也要有對應的 allow-ingress-*-from-cloudbeaver ingress 規則）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8;" vertex="1" parent="1">
-          <mxGeometry x="1050" y="760" width="540" height="60" as="geometry" />
+        <mxCell id="svcPeertube" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Service: postgres&#xa;peertube.svc.cluster.local:5432&#xa;（dedicated PostgreSQL 16）" vertex="1">
+          <mxGeometry height="80" width="220" x="890" y="910" as="geometry" />
         </mxCell>
-
-        <!-- Edges: client -> gateway -> route -> svc -> pod -->
-        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="client" target="gateway">
+        <mxCell id="legend" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8;" value="紅色虛線＝跨 namespace egress（NetworkPolicy namespaceSelector 放行，目標 namespace 各自也要有對應的 allow-ingress-*-from-cloudbeaver ingress 規則）" vertex="1">
+          <mxGeometry height="60" width="470" x="1130" y="780" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" target="gateway">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e1label" value="HTTPS (Host: cloudbeaver.nexai.org.com)" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e1">
-          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        <mxCell id="e1label" connectable="0" parent="e1" style="edgeLabel;html=1;align=center;fontSize=10;" value="HTTPS (Host: cloudbeaver.nexai.org.com)" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="gateway" target="route">
+        <mxCell id="e2" edge="1" parent="1" source="gateway" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" target="route">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e2label" value="parentRefs" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e2">
-          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        <mxCell id="e2label" connectable="0" parent="e2" style="edgeLabel;html=1;align=center;fontSize=10;" value="parentRefs" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="route" target="svc">
+        <mxCell id="e3" edge="1" parent="1" source="route" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" target="svc">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e3label" value="backendRefs :80" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e3">
-          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        <mxCell id="e3label" connectable="0" parent="e3" style="edgeLabel;html=1;align=center;fontSize=10;" value="backendRefs :80" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="svc" target="pod1">
+        <mxCell id="e4" edge="1" parent="1" source="svc" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" target="pod1">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e4label" value="selector app=cloudbeaver -&gt; :8978" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e4">
-          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        <mxCell id="e4label" connectable="0" parent="e4" style="edgeLabel;html=1;align=center;fontSize=10;" value="selector app=cloudbeaver -&gt; :8978" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry">
+            <mxPoint y="-30" as="offset" />
+          </mxGeometry>
         </mxCell>
-
-        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="pod1" target="pvc">
+        <mxCell id="e5" edge="1" parent="1" source="pod1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="pvc">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e5label" value="volumeMount /opt/cloudbeaver/workspace" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e5">
-          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        <mxCell id="e5label" connectable="0" parent="e5" style="edgeLabel;html=1;align=center;fontSize=10;" value="volumeMount /opt/cloudbeaver/workspace" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry">
+            <mxPoint x="-26" y="5" as="offset" />
+          </mxGeometry>
         </mxCell>
-
-        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="rq" target="deploy">
+        <mxCell id="e6" edge="1" parent="1" source="rq" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" target="deploy">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e6label" value="限制整個 namespace 用量" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e6">
-          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        <mxCell id="e6label" connectable="0" parent="e6" style="edgeLabel;html=1;align=center;fontSize=10;" value="限制整個 namespace 用量" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="np" target="deploy">
+        <mxCell id="e7" edge="1" parent="1" source="np" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" target="deploy">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e7label" value="只放行 Gateway ingress :8978 + DNS egress :53" style="edgeLabel;html=1;align=center;fontSize=10;" vertex="1" connectable="0" parent="e7">
-          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        <mxCell id="e7label" connectable="0" parent="e7" style="edgeLabel;html=1;align=center;fontSize=10;" value="只放行 Gateway ingress :8978 + DNS egress :53" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry">
+            <mxPoint x="-115" y="25" as="offset" />
+          </mxGeometry>
         </mxCell>
-
-        <!-- Edges: THREE cross-namespace egress arrows — the key visual concept -->
-        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;strokeColor=#b85450;strokeWidth=2;exitX=0.25;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="pod1" target="svcMysql">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="e8" edge="1" parent="1" source="pod1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;strokeColor=#b85450;strokeWidth=2;exitX=0.25;exitY=1;entryX=0.5;entryY=0;" target="svcMysql">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1165" y="680" />
+              <mxPoint x="360" y="680" />
+            </Array>
+          </mxGeometry>
         </mxCell>
-        <mxCell id="e8label" value="egress namespaceSelector&#10;kubernetes.io/metadata.name=flarum :3306" style="edgeLabel;html=1;align=center;fontSize=10;fontColor=#b85450;" vertex="1" connectable="0" parent="e8">
-          <mxGeometry x="-0.3" relative="1" as="geometry" />
+        <mxCell id="e8label" connectable="0" parent="e8" style="edgeLabel;html=1;align=center;fontSize=10;fontColor=#b85450;" value="egress namespaceSelector&#xa;kubernetes.io/metadata.name=flarum :3306" vertex="1">
+          <mxGeometry relative="1" x="-0.3" as="geometry">
+            <mxPoint x="-605" y="110" as="offset" />
+          </mxGeometry>
         </mxCell>
-
-        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;strokeColor=#b85450;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="pod1" target="svcPlanka">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="e9" edge="1" parent="1" source="pod1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;strokeColor=#b85450;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="svcPlanka">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1210" y="680" />
+              <mxPoint x="680" y="680" />
+            </Array>
+          </mxGeometry>
         </mxCell>
-        <mxCell id="e9label" value="egress namespaceSelector&#10;kubernetes.io/metadata.name=planka :5432" style="edgeLabel;html=1;align=center;fontSize=10;fontColor=#b85450;" vertex="1" connectable="0" parent="e9">
-          <mxGeometry x="-0.2" relative="1" as="geometry" />
+        <mxCell id="e9label" connectable="0" parent="e9" style="edgeLabel;html=1;align=center;fontSize=10;fontColor=#b85450;" value="egress namespaceSelector&#xa;kubernetes.io/metadata.name=planka :5432" vertex="1">
+          <mxGeometry relative="1" x="-0.2" as="geometry">
+            <mxPoint x="-371" y="110" as="offset" />
+          </mxGeometry>
         </mxCell>
-
-        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;strokeColor=#b85450;strokeWidth=2;exitX=0.75;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="pod1" target="svcPeertube">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="e10" edge="1" parent="1" source="pod1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;strokeColor=#b85450;strokeWidth=2;exitX=0.75;exitY=1;entryX=0.5;entryY=0;" target="svcPeertube">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1255" y="680" />
+              <mxPoint x="1000" y="680" />
+            </Array>
+          </mxGeometry>
         </mxCell>
-        <mxCell id="e10label" value="egress namespaceSelector&#10;kubernetes.io/metadata.name=peertube :5432" style="edgeLabel;html=1;align=center;fontSize=10;fontColor=#b85450;" vertex="1" connectable="0" parent="e10">
-          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        <mxCell id="e10label" connectable="0" parent="e10" style="edgeLabel;html=1;align=center;fontSize=10;fontColor=#b85450;" value="egress namespaceSelector&#xa;kubernetes.io/metadata.name=peertube :5432" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry">
+            <mxPoint x="-175" y="110" as="offset" />
+          </mxGeometry>
         </mxCell>
-
       </root>
     </mxGraphModel>
   </diagram>

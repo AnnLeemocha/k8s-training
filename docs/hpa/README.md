@@ -96,7 +96,7 @@ draw.io 的 [`05-hpa.yaml`](../../apps/01-draw.io/manifest/05-hpa.yaml)
 |---|---|
 | filebrowser | `replicas: 1` + `Recreate`，因為背後是 sqlite（單一寫入者），本來就不能開多個 replica，HPA 對這種架構沒有意義 |
 | flarum / planka / peertube | 應用程式本身用 Deployment 沒問題，但都搭配同 namespace 的 StatefulSet（mysql/postgres），資料庫本身不適合水平擴縮；應用層要加 HPA 在架構上是可行的，只是教材選擇把「HPA」這個教學重點集中在 draw.io 一個地方，其餘產品把篇幅留給各自的獨有主題（initContainer、跨 namespace 依賴…） |
-| onlyoffice / peertube | 已經是全教材資源最吃緊的兩個產品（見根目錄 README 的節點資源記憶），釘選在 `gpu01` 上，多開 replica 前要先確認節點/配額都夠，教學上風險比效益高 |
+| onlyoffice / peertube | 已經是全教材資源最吃緊的兩個產品（見根目錄 README 的節點資源記憶），平常就可能被排到 `gpu01` 這類較空的節點，多開 replica 前要先確認節點/配額都夠，教學上風險比效益高 |
 | cloudbeaver | 單純的用戶端角色，流量模式（DB 管理操作）本來就不是「使用者尖峰」型態，沒有自動擴縮的實務需求 |
 
 draw.io 適合當唯一範例，正是因為它**無狀態、無外部依賴**（純前端 SPA，

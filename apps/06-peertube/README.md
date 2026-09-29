@@ -37,8 +37,9 @@ Redis（Deployment + emptyDir）+ 應用程式本體，一次把前面學過的
   ——帳號名稱本身是 PeerTube 寫死的 `root`，沒有變數可以改。若資料庫
   已經有帳號，改這兩個值不會回頭改到既有帳號，密碼要另外用內建的
   reset-password 腳本重設，見下方「帳號密碼一覽」與「驗證」段落。
-- 沿用 onlyoffice 的排程做法：三個 Pod 都用 `nodeSelector` +
-  `toleration` 排到記憶體較寬裕的 `gpu01`。
+- 沿用 onlyoffice 的排程做法：三個 Pod 都只加 `toleration`，允許排到
+  記憶體較寬裕的 `gpu01` 但不指定節點（`nodeSelector` 註解保留，排不進去
+  時三個檔案一起取消註解）。
 
 提供三種形式，跟其他產品的教學走法一致：
 
@@ -52,7 +53,7 @@ Redis（Deployment + emptyDir）+ 應用程式本體，一次把前面學過的
 **前置條件**：
 
 ```bash
-kubectl top node gpu01                               # 上課前先確認節點資源狀況
+kubectl top nodes                                   # 上課前先確認節點資源狀況
 kubectl apply -f ../shared-infra/00-dev-gateway.yaml
 ```
 

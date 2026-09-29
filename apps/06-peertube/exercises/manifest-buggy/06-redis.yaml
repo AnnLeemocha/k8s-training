@@ -56,9 +56,10 @@ spec:
       labels:
         app: redis
     spec:
-      # 跟 postgres 排到同一台 gpu01，理由同 05-postgres-statefulset.yaml。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
+      # 排程設定同 05-postgres-statefulset.yaml：只容忍 gpu01 的 taint、
+      # 不指定節點；要釘到 gpu01 再取消註解 nodeSelector。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

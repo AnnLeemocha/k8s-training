@@ -12,10 +12,12 @@ RabbitMQ，全部包在同一個 container 裡執行，不需要外接資料庫�
 2 CPU / 4GB RAM）。重點不在應用邏輯本身，而在「資源緊繃的共用叢集，
 該怎麼安排一個吃重的工作負載」——這座叢集 `k8s01~03` 三台 Node 記憶體
 長期使用率已經 81~85%，硬把這個產品排上去有拖垮節點的風險，所以本產品
-是全課程**首個 `nodeSelector` + `toleration`（節點排程）範例**：明確把
-Pod 排到記憶體最空的 `gpu01`（原本保留給 GPU 工作負載，帶
-`nvidia.com/gpu=true:NoSchedule` taint），示範「taint/toleration 不是
-只服務 GPU 排程，任何『這個節點保留給特定用途』的情境都適用」。另外還有
+是全課程**首個 `toleration`（節點排程）範例**：讓 Pod「可以」排到記憶體
+最空的 `gpu01`（原本保留給 GPU 工作負載，帶
+`nvidia.com/gpu=true:NoSchedule` taint），但不指定節點（`nodeSelector`
+註解保留，排不進去時再取消註解釘死），示範「taint/toleration 不是
+只服務 GPU 排程，任何『這個節點保留給特定用途』的情境都適用」，以及
+「toleration 是允許、nodeSelector 才是指定」的差別。另外還有
 一個很寫實的除錯教材：**「官方建議的最低需求」不等於「實際會用到的量」**
 ——本產品的官方建議是 2 CPU / 4GB，但實測穩定狀態下記憶體用量只有約
 400~500Mi，遠低於官方建議值，之後的「資源該給多少」章節會用這個真實
@@ -52,8 +54,8 @@ flowchart TB
             Secret["Secret: onlyoffice-secret\nJWT_SECRET"]
             Route["HTTPRoute: onlyoffice\nhost: onlyoffice.nexai.org.com"]
             Svc["Service: onlyoffice\nClusterIP :80 -> :80"]
-            subgraph Node["Node: gpu01（記憶體使用率最低 ~24%，帶 GPU taint）"]
-                subgraph Deploy["Deployment: onlyoffice (replicas=1)\npinned via nodeSelector + toleration"]
+            subgraph Node["Node: Scheduler 挑選（可排 gpu01：記憶體 ~24%，帶 GPU taint）"]
+                subgraph Deploy["Deployment: onlyoffice (replicas=1)\ntoleration（nodeSelector 註解保留）"]
                     P1["Pod\nonlyoffice/documentserver:latest :80\n內建 nginx/docservice/\npostgres/redis/rabbitmq\n（皆非獨立 K8s 資源）"]
                 end
                 PVC["PVC: onlyoffice-data\n/var/www/onlyoffice/Data\n(RWO, rook-ceph-block)\nlog/lib 用 emptyDir"]
@@ -118,7 +120,7 @@ CPU 會短暫吃滿 limit，是一次性行為，不是穩定負載。這是本�
 決定把 Pod 排到哪個節點的依據。本例刻意訂得比官方建議的 2 CPU/4GB
 低一截，但仍明顯高於實測的 400~500Mi 穩定用量——這不是隨便打折，
 是因為 `requests` 除了「平常夠用」，還要留給「這是全課程資源需求最重
-的產品、且要靠 nodeSelector 硬擠進 `gpu01`」這個排程限制一些緩衝，
+的產品，而 k8s01~03 記憶體已經很緊」這個排程限制一些緩衝，
 避免把 `requests` 訂得太貼近實測值，結果 Node 上其他非預期尖峰（例如
 第一次啟動的字型產生作業）把資源擠爆。
 
@@ -200,7 +202,7 @@ CPU。配額不能只填剛好 1——同一份 ResourceQuota 把 `pods` 上限�
 | `__FILL_ME_6__` | 02-secret.yaml | 設定 JWT 簽章金鑰的值 | `stringData.JWT_SECRET` | 教學用途沒有格式限制，自己取一個字串即可，但要記得這把金鑰之後串接 filebrowser 時對方也要用同一把簽 token |
 | `__FILL_ME_7__` | 03-pvc.yaml | 設定這個 PVC 要用哪一個 StorageClass | `spec.storageClassName` | 這座叢集**沒有 default StorageClass**，必須明確指定；這個 PVC 是單寫（`ReadWriteOnce`）場景，該挑哪一種？（提示：`training.md` 裡有列出這座叢集可用的 StorageClass 名稱） |
 | `__FILL_ME_8__` | 03-pvc.yaml | 設定要申請多少儲存容量 | `spec.resources.requests.storage` | 檔案上方教學註解已經寫出實際要申請的容量 |
-| `__FILL_ME_9__` | 04-deployment.yaml | 設定要把 Pod 排到哪一台 Node 上 | `spec.template.spec.nodeSelector."kubernetes.io/hostname"` | 檔案上方教學註解說了這座叢集哪一台 Node 記憶體用量最低、適合塞下這個吃重的工作負載 |
+| `__FILL_ME_9__` | 04-deployment.yaml | 設定要把 Pod 排到哪一台 Node 上 | `spec.template.spec.nodeSelector."kubernetes.io/hostname"` | 檔案上方教學註解說了這座叢集哪一台 Node 記憶體用量最低、適合塞下這個吃重的工作負載（此行預設已註解、改以 toleration 為主不指定節點；屬選填，若要練習請取消註解後再填） |
 | `__FILL_ME_10__` | 04-deployment.yaml | 設定要容忍（tolerate）哪一個 taint 的 key | `tolerations[0].key` | 目標 Node 身上帶的是哪個廠牌的 GPU taint？（提示：`nvidia.com/...`） |
 | `__FILL_ME_11__` | 04-deployment.yaml | 設定要容忍的 taint value 要等於什麼 | `tolerations[0].value` | 對照這台 Node 身上 taint 的實際 value（在 `kubectl describe node gpu01` 看得到） |
 | `__FILL_ME_12__` | 04-deployment.yaml | 設定要容忍的 taint effect 是什麼 | `tolerations[0].effect` | taint 的三種 effect（`NoSchedule`/`PreferNoSchedule`/`NoExecute`）中，這座叢集的 GPU taint 用的是哪一種？ |
@@ -268,8 +270,8 @@ CPU。配額不能只填剛好 1——同一份 ResourceQuota 把 `pods` 上限�
 
 - [ ] `kubectl get pod -n onlyoffice -o wide` 顯示 1 個 Pod，為
       `Running` 且 `READY 1/1`（沒有 `CrashLoopBackOff`、沒有 `0/1`、
-      沒有 `Pending`），且 `NODE` 欄位顯示是排在 **`gpu01`**（不是其他
-      節點）
+      沒有 `Pending`）；`NODE` 欄位由 Scheduler 決定（k8s01~03 或
+      `gpu01` 都算正確，若有取消註解 `nodeSelector` 則必須是 `gpu01`）
 - [ ] `kubectl get pvc onlyoffice-data -n onlyoffice` 顯示 `STATUS`
       為 `Bound`，`kubectl describe pod` 能看到 volume 掛在
       `/var/www/onlyoffice/Data`

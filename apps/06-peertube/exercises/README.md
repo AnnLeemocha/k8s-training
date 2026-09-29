@@ -24,8 +24,8 @@ ConfigMap 掛載腳本、跨元件 NetworkPolicy、節點排程）串在同一�
   聯邦資訊要用「使用者外部看到的網址」，這兩者搞混是所有「後面有反向代理」
   架構最常見的錯誤來源之一。
 
-三個元件都靠 `nodeSelector`/`toleration` 排到記憶體較寬裕的 `gpu01`
-（沿用 onlyoffice 的排程做法），且 Redis、PeerTube 本體都**不能**
+三個元件都加上 `toleration`，讓 Scheduler「可以」排到記憶體較寬裕的
+`gpu01`、但不指定節點（`nodeSelector` 註解保留，沿用 onlyoffice 的排程做法），且 Redis、PeerTube 本體都**不能**
 `capabilities.drop: [ALL]`（entrypoint 需要以 root 自降權），跟
 mysql 同一種教訓、但跟 draw.io/filebrowser（可以 drop）、planka
 （映像本身非 root，不需要 drop）形成完整的三方對照。
@@ -58,21 +58,21 @@ flowchart TB
             subgraph AppGroup["PeerTube 本體"]
                 direction TB
                 SvcApp["Service: peertube\nClusterIP :80 -> :9000"]
-                DeployApp["Deployment: peertube (replicas=1)\nnodeSelector/toleration -> gpu01\n無 capabilities.drop"]
+                DeployApp["Deployment: peertube (replicas=1)\ntoleration（可排 gpu01）\n無 capabilities.drop"]
             end
 
             subgraph PgGroup["PostgreSQL"]
                 direction TB
                 CM["ConfigMap: postgres-initdb\n掛載於 /docker-entrypoint-initdb.d/\n首次啟動自動建立 pg_trgm / unaccent"]
                 SvcPg["Service: postgres（headless）\nclusterIP: None, :5432"]
-                StsPg["StatefulSet: postgres (replicas=1)\nnodeSelector/toleration -> gpu01"]
+                StsPg["StatefulSet: postgres (replicas=1)\ntoleration（可排 gpu01）"]
                 PvcPg["PVC: data (RWO, 5Gi)\nrook-ceph-block"]
             end
 
             subgraph RedisGroup["Redis"]
                 direction TB
                 SvcRedis["Service: redis（headless）\nclusterIP: None, :6379"]
-                DeployRedis["Deployment: redis (replicas=1)\nnodeSelector/toleration -> gpu01\n無 capabilities.drop"]
+                DeployRedis["Deployment: redis (replicas=1)\ntoleration（可排 gpu01）\n無 capabilities.drop"]
                 Empty["emptyDir: data（非 PVC）\njob queue/快取，重建可接受遺失"]
             end
 
@@ -216,14 +216,14 @@ requests 的新 Pod」的餘裕，所以正解抓 `requests.cpu: "2"`（2000m，
 | `__FILL_ME_13__` | 04-postgres-service.yaml | 設定這個 Service 要不要配發 ClusterIP | `spec.clusterIP` | StatefulSet 通常搭配哪一種 Service（讓每個 Pod 有自己的 DNS 記錄，而不是共用一個負載平衡 IP）？填哪個特殊值代表「不要配發」？ |
 | `__FILL_ME_14__` | 04-postgres-service.yaml | 設定這個 Service 要選中哪些 Pod | `spec.selector.app` | 跟 05-postgres-statefulset.yaml 的 `template.metadata.labels.app` 必須完全一致 |
 | `__FILL_ME_15__` | 04-postgres-service.yaml | 設定 Service 要把流量轉去 Pod 的哪個 port | `spec.ports[0].targetPort` | 對應到 Pod 上 named port 的名稱，不是數字 |
-| `__FILL_ME_16__` | 05-postgres-statefulset.yaml | 設定要把 Pod 排到哪一個節點 | `spec.template.spec.nodeSelector.<key>`（節點名稱） | 教學重點段落說明了為什麼這三個元件都要排到同一個節點，是哪個節點？ |
+| `__FILL_ME_16__` | 05-postgres-statefulset.yaml | 設定要把 Pod 排到哪一個節點 | `spec.template.spec.nodeSelector.<key>`（節點名稱） | 教學重點段落說明了為什麼這三個元件都要排到同一個節點，是哪個節點？（此行預設已註解、改以 toleration 為主不指定節點；屬選填，若要練習請取消註解後再填） |
 | `__FILL_ME_17__` | 05-postgres-statefulset.yaml | 設定 initdb 腳本要掛到容器裡的哪個路徑 | `volumeMounts[1].mountPath` | 官方 postgres image 只會自動執行這一個固定路徑底下的初始化腳本，路徑錯了 extension 永遠不會被建立（可對照 `manifest-buggy/` 的除錯題感受這個症狀） |
 | `__FILL_ME_18__` | 05-postgres-statefulset.yaml | 設定 initdb volume 要引用哪個 ConfigMap | `volumes[0].configMap.name` | 要跟 03-postgres-initdb-configmap.yaml 的 `metadata.name` 一致 |
 | `__FILL_ME_19__` | 05-postgres-statefulset.yaml | 設定 PVC 要用哪個 StorageClass | `volumeClaimTemplates[0].spec.storageClassName` | 這座叢集**沒有 default StorageClass**，資料庫類單寫場景該選 RWO 還是 RWX 的那個 class？（`../README.md` 或 `../../training.md` 有列出叢集的 StorageClass 名稱） |
 | `__FILL_ME_20__` | 05-postgres-statefulset.yaml | 設定 postgres 資料需要多少儲存空間 | `volumeClaimTemplates[0].spec.resources.requests.storage` | 這是教學用途的小容量配置，抓個位數 Gi 即可 |
 | `__FILL_ME_21__` | 06-redis.yaml | 設定 redis Service 要選中哪些 Pod | `Service.spec.selector.app` | 跟同檔案 Deployment 的 `template.metadata.labels.app` 必須完全一致（`manifest-buggy/` 的除錯題就是在考這個） |
 | `__FILL_ME_22__` | 06-redis.yaml | 設定 redis Service 要把流量轉去 Pod 的哪個 port | `Service.spec.ports[0].targetPort` | 對應到 Pod 上 named port 的名稱，不是數字 |
-| `__FILL_ME_23__` | 06-redis.yaml | 設定要把 redis Pod 排到哪一個節點 | `Deployment.spec.template.spec.nodeSelector.<key>`（節點名稱） | 跟 `__FILL_ME_16__` 應該填同一個節點名稱——三個元件為什麼要排到同一台？ |
+| `__FILL_ME_23__` | 06-redis.yaml | 設定要把 redis Pod 排到哪一個節點 | `Deployment.spec.template.spec.nodeSelector.<key>`（節點名稱） | 跟 `__FILL_ME_16__` 應該填同一個節點名稱——三個元件為什麼要排到同一台？（此行預設已註解、改以 toleration 為主不指定節點；屬選填，若要練習請取消註解後再填） |
 | `__FILL_ME_24__` | 06-redis.yaml | 填入 redis 容器內部實際監聽的 port | `Deployment...containers[0].ports[0].containerPort` | redis 的預設監聽埠是多少？要跟 `__FILL_ME_22__` 對得上 |
 | `__FILL_ME_25__` | 07-peertube-secret.yaml | 設定管理員帳號的 Email | `stringData.PEERTUBE_ADMIN_EMAIL` | 這是教學用途的固定值，只有在資料庫全新初始化時才會生效，任意填一個看起來像 email 的字串即可 |
 | `__FILL_ME_26__` | 07-peertube-secret.yaml | 設定 PeerTube 應用程式連線資料庫要用的密碼 | `stringData.PEERTUBE_DB_PASSWORD` | 這個值必須跟 02-postgres-secret.yaml 的 `POSTGRES_PASSWORD` **完全一致**，否則 PeerTube 連得到 postgres 這個位址、但認證會失敗（`manifest-buggy/` 的除錯題就是在考這個） |
@@ -299,8 +299,9 @@ requests 的新 Pod」的餘裕，所以正解抓 `requests.cpu: "2"`（2000m，
 
 - [ ] `kubectl get pods -n peertube -o wide` 顯示 **3 個 Pod**
       （`redis-*`、`postgres-0`、`peertube-*`）皆為 `Running` 且
-      `READY 1/1`，且都排在 `gpu01` 節點上（沒有 `CrashLoopBackOff`、
-      沒有 `0/1`、沒有 `Pending`）
+      `READY 1/1`（沒有 `CrashLoopBackOff`、沒有 `0/1`、沒有 `Pending`）；
+      落在哪個節點由 Scheduler 決定，若有取消註解 `nodeSelector` 則都必須在
+      `gpu01`
 - [ ] `kubectl exec -n peertube postgres-0 -- psql -U peertube -d peertube -c
       "\dx"` 顯示已安裝的 extension 清單裡有 `pg_trgm` 與 `unaccent`
       （證明 ConfigMap 初始化腳本真的有跑）

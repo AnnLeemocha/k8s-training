@@ -2,7 +2,7 @@
 
 用 Helm 部署 [PeerTube](https://github.com/Chocobozzz/PeerTube)，全教材整合度最高的產品：
 PostgreSQL（StatefulSet+PVC）+ Redis（Deployment+emptyDir）+ PeerTube
-應用本身，三個元件都釘在同一個 GPU 節點上。對應的純 yaml 教學版本見
+應用本身，三個元件都容忍 GPU 節點的 taint（預設不指定節點）。對應的純 yaml 教學版本見
 [`../manifest/`](../manifest/)。
 
 Chart 建立的資源（`templates/`）：PeerTube Deployment、postgres
@@ -24,14 +24,15 @@ helm uninstall peertube -n peertube
 
 ### `nodePlacement`
 
-三個元件（postgres/redis/peertube）都釘在同一個節點，因為本叢集
-`k8s01~03` 記憶體長期在 81-91% 使用率，扛不住這個產品三個 workload
-的加總。
+三個元件（postgres/redis/peertube）共用同一組設定。預設只給
+tolerations、不指定節點，由 Scheduler 自行挑選；本叢集 `k8s01~03`
+記憶體長期在 81-91% 使用率，若扛不住這個產品三個 workload 的加總，
+再設定 `nodeSelector` 把三個元件都釘到 `gpu01`。
 
 | 參數 | 說明 | 預設值 |
 |---|---|---|
-| `nodePlacement.nodeSelector` | 釘死節點 | `kubernetes.io/hostname: gpu01` |
-| `nodePlacement.tolerations` | 對應 `gpu01` 的 GPU taint | `[{key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}]` |
+| `nodePlacement.nodeSelector` | 指定節點（預設不設） | 未設定（`values.yaml` 內註解保留 `kubernetes.io/hostname: gpu01`） |
+| `nodePlacement.tolerations` | 對應 `gpu01` 的 GPU taint，允許（不強制）排到 `gpu01` | `[{key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}]` |
 
 ### `postgres`
 
@@ -102,8 +103,10 @@ root 自降權，不能套用 `capabilities.drop: [ALL]`。
 
 - `peertube.rootPassword` 只在首次啟動生效，建立後無法從資料庫復原，
   務必第一次部署後立刻記錄。
-- 三個元件都需要 `nodePlacement` 才排得進去，部署前先
-  `kubectl top nodes` 確認 `gpu01` 空間足夠。
+- 預設只給 tolerations、不指定節點，部署前先 `kubectl top nodes`
+  確認有節點塞得下；排不進去時用
+  `--set nodePlacement.nodeSelector."kubernetes\.io/hostname"=gpu01`
+  把三個元件一起釘到 `gpu01`。
 - `postgres`/`redis`/`peertube.image` 三個官方映像都不能套用
   `capabilities.drop: [ALL]`，是這個產品裡重複驗證過的容器安全模型
   慣例。

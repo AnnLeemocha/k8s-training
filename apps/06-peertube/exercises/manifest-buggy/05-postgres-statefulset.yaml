@@ -1,9 +1,11 @@
 # Step 5：PostgreSQL StatefulSet
 # 教學重點：
-#   - nodeSelector/toleration 排到 gpu01：延續 onlyoffice 的做法。
-#     這座叢集 k8s01~03 記憶體已經很緊繃，PeerTube 這組（postgres +
-#     redis + app 三個 Pod）乾脆整組都排到記憶體較寬裕的 gpu01，
-#     避免又把其他共用工作負載擠爆。
+#   - toleration 為主、不指定節點：延續 onlyoffice 的做法。
+#     三個 Pod（postgres + redis + app）都容忍 gpu01 的 GPU taint，
+#     讓 Scheduler「可以」把它們排到 gpu01，但不強制，由各節點剩餘
+#     資源決定落點。這座叢集 k8s01~03 記憶體已經很緊繃，若 Pod 卡在
+#     Pending（Insufficient memory），可取消註解 nodeSelector，把整組
+#     釘到記憶體較寬裕的 gpu01，避免又把其他共用工作負載擠爆。
 #   - 沿用 mysql/planka 學到的教訓：不 drop capabilities、PGDATA
 #     指到子目錄避開 lost+found 問題。
 #   - initdb ConfigMap：見 03-postgres-initdb-configmap.yaml。
@@ -28,12 +30,13 @@ spec:
       labels:
         app: postgres
     spec:
-      # 見上方教學重點：整組（postgres/redis/peertube）都刻意排到
-      # 記憶體較寬裕的 gpu01，避免擠爆其他共用工作負載。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
-      # gpu01 平常帶有 NoSchedule taint（保留給 GPU 工作負載），這裡要
-      # 明確容忍這個 taint，Pod 才排得上去。
+      # 見上方教學重點：預設不指定節點；若要整組（postgres/redis/
+      # peertube）釘到記憶體較寬裕的 gpu01，三個檔案的 nodeSelector
+      # 都要一起取消註解。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
+      # gpu01 平常帶有 NoSchedule taint（保留給 GPU 工作負載），這裡
+      # 容忍這個 taint，Pod 才「有資格」排上 gpu01（但不保證一定排過去）。
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

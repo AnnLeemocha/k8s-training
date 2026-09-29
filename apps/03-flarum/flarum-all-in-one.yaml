@@ -202,10 +202,12 @@ spec:
     spec:
       # k8s01~03 這座訓練叢集是跟其他團隊共用的實體節點，記憶體長期
       # 吃緊（曾量到 100%+），gpu01 平常只有 GPU 相關工作負載會用到、
-      # 平時閒置，這裡跟 onlyoffice/peertube 一樣，把資料庫類重量級
-      # 工作負載排到 gpu01，並容忍它預留給 GPU 工作負載的 taint。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
+      # 平時閒置。這裡跟 onlyoffice/peertube 一樣，容忍 gpu01 預留給
+      # GPU 工作負載的 taint，讓 Scheduler「可以」把它排到 gpu01，但不
+      # 指定節點（nodeSelector 已註解保留），由各節點剩餘資源決定落點；
+      # 若 Pod 卡在 Pending，再取消註解把它釘到 gpu01。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -415,12 +417,12 @@ spec:
       labels:
         app: flarum
     spec:
-      # 跟同 namespace 的 mysql 排到同一台 gpu01，理由同前（見
-      # 04-mysql-statefulset.yaml 的說明：k8s01~03 記憶體吃緊，
-      # gpu01 平時閒置）；同一 namespace 的 app/db 排在同一台節點上，
-      # 彼此走內部網路，延遲也更低。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
+      # 排程設定同 mysql（見 04-mysql-statefulset.yaml 的說明）：只容忍
+      # gpu01 的 taint、不指定節點。若要取消註解 nodeSelector 把 app/db
+      # 釘到同一台 gpu01，兩邊要一起改；同一台節點上彼此走內部網路，
+      # 延遲也更低。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

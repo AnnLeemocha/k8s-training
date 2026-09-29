@@ -49,10 +49,10 @@ flowchart TB
             R4["HTTPRoute"] --> S4["Service"] --> D4["Deployment"]
             D4 --> SS4["StatefulSet: postgres"]
         end
-        subgraph N5["onlyoffice（釘選 gpu01）"]
+        subgraph N5["onlyoffice（toleration 可排 gpu01）"]
             R5["HTTPRoute"] --> S5["Service"] --> D5["Deployment\n內建 DB/Redis/MQ"]
         end
-        subgraph N6["peertube（釘選 gpu01）"]
+        subgraph N6["peertube（toleration 可排 gpu01）"]
             R6["HTTPRoute"] --> S6["Service"] --> D6["Deployment: app"]
             D6 --> SS6["StatefulSet: postgres"]
             D6 --> D6R["Deployment: redis (emptyDir)"]
@@ -89,8 +89,9 @@ flowchart TB
   `rook-cephfs`（CephFS，**RWX** 多寫共享，檔案類使用）。
 - **4 個 Worker Node**：`k8s01`～`k8s03`（記憶體長期 81～91% 使用率）+
   `gpu01`（帶 `nvidia.com/gpu=true:NoSchedule` taint、記憶體較空）。資源最重的
-  onlyoffice、peertube 用 `nodeSelector` + `toleration` 刻意排到 `gpu01`，
-  是 taint/toleration 教學的實例。
+  onlyoffice、peertube（以及 flarum/planka 的資料庫）都加上 `toleration`，
+  讓 Scheduler「可以」排到 `gpu01` 但不指定節點（`nodeSelector` 已註解保留，
+  排不進去時再取消註解釘到 `gpu01`），是 taint/toleration 教學的實例。
 
 ---
 
@@ -125,7 +126,7 @@ flowchart TB
 | 2 | **[filebrowser](apps/filebrowser/)** | ★★☆☆☆ | 第一個有狀態範例 | PVC + StorageClass（RWX cephfs vs RWO ceph-block 的差異）、ConfigMap；示範「單副本 + Recreate」什麼時候該用、HPA 什麼時候不該用 |
 | 3 | **[flarum](apps/flarum/)** | ★★★☆☆ | 踩坑最多、最完整的單一產品教學 | StatefulSet（mysql）、**initContainer**（全教材唯一）、2 個 Secret 互相 `secretKeyRef` 引用、httpGet/tcpSocket/exec 三種 probe 都出現 |
 | 4 | **[planka](apps/planka/)** | ★★★☆☆ | 與 flarum 的對照組 | 同樣是「App + 專屬 DB 同 namespace」架構，但換成 PostgreSQL；官方映像本身非 root，**不需要** cap-drop、**不需要** initContainer，跟 flarum 並排看最有效 |
-| 5 | **[onlyoffice](apps/onlyoffice/)** | ★★★★☆ | 資源與排程 | 全教材資源需求最重的單體應用（內建 DB/Redis/MQ）；**nodeSelector + toleration** 首次出現，教「共用叢集資源緊繃時怎麼安排重工作負載」 |
+| 5 | **[onlyoffice](apps/onlyoffice/)** | ★★★★☆ | 資源與排程 | 全教材資源需求最重的單體應用（內建 DB/Redis/MQ）；**toleration**（搭配註解保留的 nodeSelector）首次出現，教「共用叢集資源緊繃時怎麼安排重工作負載」 |
 | 6 | **[peertube](apps/peertube/)** | ★★★★★ | 全教材最複雜的整合範例 | 3 個元件（PostgreSQL StatefulSet + Redis Deployment/emptyDir + App）在同一 namespace 協作，NetworkPolicy 規則數最多（7 條），PVC vs emptyDir 取捨、reverse-proxy 設定 vs 容器內部 port 的差異 |
 | 7 | **[cloudbeaver](apps/cloudbeaver/)** | ★★★★☆ | 收尾概念 | 全教材唯一「跨 namespace 存取」案例：作為 flarum/planka/peertube 三個資料庫的共用用戶端，NetworkPolicy 改用 `namespaceSelector`，跟前面所有 same-namespace `podSelector` 案例形成對照 |
 
@@ -145,8 +146,8 @@ flowchart TB
 | filebrowser | Deployment（`replicas:1` + `Recreate`） | 2 個：RWX cephfs（檔案）+ RWO ceph-block（sqlite） | ConfigMap | Service + HTTPRoute | ✗（刻意不做） | 4 條 | 無 | RWX vs RWO 對照組 |
 | flarum | Deployment + **StatefulSet**（mysql） | 2 個：storage RWO + assets RWX | **2 個 Secret 互相引用** | 2 組 Service + HTTPRoute | 無 | 6 條（same-ns podSelector） | 無 | **initContainer**、`enableServiceLinks:false` 實戰踩坑 |
 | planka | Deployment + **StatefulSet**（postgres） | 1 個 RWO | 2 個 Secret | 2 組 Service + HTTPRoute | 無 | 6 條（same-ns podSelector-to-podSelector） | 無 | 映像非 root，免 cap-drop / initContainer 對照組 |
-| onlyoffice | Deployment（單體、內建 DB/Redis/MQ） | 1 個 RWO（其餘 emptyDir） | Secret | Service + HTTPRoute | 無 | 4 條 | ✓ nodeSelector + toleration（GPU 節點） | NetworkPolicy 阻斷出網導致 CPU loop 的除錯案例 |
-| peertube | **2 個 Deployment**（redis/app）+ **StatefulSet**（postgres） | 1 個 RWO（redis 刻意用 emptyDir） | 2 個 Secret，ConfigMap（initdb 擴充 SQL） | **3 組 Service** + HTTPRoute | 無 | **7 條**（最多） | ✓ 全部元件釘 GPU 節點 | 全課程最複雜整合 |
+| onlyoffice | Deployment（單體、內建 DB/Redis/MQ） | 1 個 RWO（其餘 emptyDir） | Secret | Service + HTTPRoute | 無 | 4 條 | ✓ toleration（可排 GPU 節點；nodeSelector 註解保留） | NetworkPolicy 阻斷出網導致 CPU loop 的除錯案例 |
+| peertube | **2 個 Deployment**（redis/app）+ **StatefulSet**（postgres） | 1 個 RWO（redis 刻意用 emptyDir） | 2 個 Secret，ConfigMap（initdb 擴充 SQL） | **3 組 Service** + HTTPRoute | 無 | **7 條**（最多） | ✓ 全部元件 toleration（可排 GPU 節點） | 全課程最複雜整合 |
 | cloudbeaver | Deployment | 1 個 RWO | 無（本身是用戶端，不存密碼） | Service + HTTPRoute | 無 | 4 條，**唯一用 `namespaceSelector` 跨 namespace** | 無 | 唯一跨 namespace 存取案例 |
 
 跨產品共通的叢集層級教學點：**StorageClass 沒有 default**（每個 PVC 都要明確

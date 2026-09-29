@@ -44,12 +44,12 @@ spec:
       labels:
         app: flarum
     spec:
-      # 跟同 namespace 的 mysql 排到同一台 gpu01，理由同前（見
-      # 04-mysql-statefulset.yaml 的說明：k8s01~03 記憶體吃緊，
-      # gpu01 平時閒置）；同一 namespace 的 app/db 排在同一台節點上，
-      # 彼此走內部網路，延遲也更低。
-      nodeSelector:
-        kubernetes.io/hostname: gpu01
+      # 排程設定同 mysql（見 04-mysql-statefulset.yaml 的說明）：只容忍
+      # gpu01 的 taint、不指定節點。若要取消註解 nodeSelector 把 app/db
+      # 釘到同一台 gpu01，兩邊要一起改；同一台節點上彼此走內部網路，
+      # 延遲也更低。
+      # nodeSelector:
+      #   kubernetes.io/hostname: gpu01
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

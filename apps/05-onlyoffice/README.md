@@ -13,12 +13,15 @@ container 裡）。重點不在應用邏輯，而在「資源緊繃的共用叢�
   Node 目前實際記憶體使用率已經 81~85%（`kubectl top nodes`），
   硬把這個 4GB 建議規格的產品排上去，有拖垮整個 Node、波及其他
   共用工作負載（這座叢集還跑著 Rancher/Ceph/Velero）的風險。
-- **nodeSelector + toleration**：`gpu01` 目前記憶體使用率最低
-  （~24%），但它有 `nvidia.com/gpu=true:NoSchedule` 的 taint（保留給
-  真正需要 GPU 的工作負載）。這裡用 `nodeSelector` 指定排到
-  `gpu01`，並加上對應 `toleration`，讓一個完全不需要 GPU 的 Pod
-  也能排過去——藉此講「taint/toleration 不是只服務 GPU 排程，
-  任何『這個節點保留給特定用途』的情境都適用」。
+- **toleration（nodeSelector 註解保留）**：`gpu01` 目前記憶體使用率
+  最低（~24%），但它有 `nvidia.com/gpu=true:NoSchedule` 的 taint（保留給
+  真正需要 GPU 的工作負載）。這裡只加上對應 `toleration`、不指定節點，
+  讓一個完全不需要 GPU 的 Pod「也能」排過去，實際落點由 Scheduler 依
+  各節點剩餘資源決定——藉此講「taint/toleration 不是只服務 GPU 排程，
+  任何『這個節點保留給特定用途』的情境都適用」，以及「toleration 只是
+  允許、不是指定；要指定節點得靠 `nodeSelector`/`nodeAffinity`」。若 Pod
+  卡在 `Pending`（Insufficient memory），取消註解 `nodeSelector` 即可釘到
+  `gpu01`。
 - **實測發現：官方文件的 4GB 是保守值**，穩定狀態下實測記憶體用量
   約 400~500Mi，遠低於官方建議；但第一次啟動時的字型/主題產生
   作業會短暫吃滿 CPU limit，這是一次性行為，不是穩定負載。
@@ -82,8 +85,9 @@ helm install onlyoffice ./chart -n onlyoffice
 
 - 第一次啟動要等內部好幾個服務（postgres/redis/rabbitmq/docservice/
   字型產生）都跑完，實測約 1~2 分鐘才會 Ready，屬正常現象。
-- 如果 `gpu01` 之後真的要跑 GPU 工作負載、資源被排擠，記得把這個
-  namespace 刪掉或調整 `nodeSelector` 到其他有空間的 Node。
+- 如果有啟用 `nodeSelector` 釘在 `gpu01`，而 `gpu01` 之後真的要跑 GPU
+  工作負載、資源被排擠，記得把這個 namespace 刪掉，或改回註解讓
+  Scheduler 挑其他有空間的 Node。
 - `JWT_SECRET` 僅供教學使用，若要跟 filebrowser 等其他系統整合，
   對方也要用同一把金鑰簽 token。
 - 若要跟 [filebrowser](../filebrowser/)（FileBrowser Quantum）整合：
