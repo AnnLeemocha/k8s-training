@@ -78,8 +78,85 @@ kubectl describe httproute drawio -n drawio
 kubectl get hpa -n drawio -w               # 施加負載後觀察 replicas 變化
 ```
 
+### HPA 施壓實測（2026-09-30）
+
+用 [hpa-busy-job.yaml](hpa-busy-job.yaml) 對 Service 施壓，觀察 HPA 擴容：
+
+```bash
+# 終端機 A：觀察
+kubectl get hpa drawio -n drawio -w
+# 終端機 B：施壓（2 個 Pod × 30 個 curl 迴圈反覆下載 js/app.min.js，300 秒後自動結束）
+kubectl apply -f hpa-busy-job.yaml
+# 重跑前先刪掉舊 Job；全部測完清理整個 namespace
+kubectl delete job hpa-demo-load -n hpa-loadgen
+kubectl delete namespace hpa-loadgen
+```
+
+**施壓 Job 為什麼要放在獨立的 `hpa-loadgen` namespace**：第一次把 Job
+放在 `drawio` namespace 裡跑（30 個 worker、5 分鐘），CPU 只衝到 53%
+就掉回 22~25%，完全沒觸發擴容。原因是 Job 沒寫 `resources`，被 drawio
+的 LimitRange 套上預設 `cpu limit: 250m`，**施壓端自己被限流**，壓力
+送不出去。但也不能直接在 drawio namespace 調高它的 limit，否則會吃掉
+drawio 的 ResourceQuota，HPA 要開新 Pod 時反而沒額度。移到獨立
+namespace（每個施壓 Pod limit 1 核）後，實測曲線如下：
+
+```text
+07:54:08  cpu:   2%/70%  replicas=2   施壓 Pod 開始運作
+07:54:23  cpu:  42%/70%  replicas=2
+07:54:39  cpu: 109%/70%  replicas=2   超過門檻
+07:54:54  cpu: 154%/70%  replicas=4   一次從 2 加到 4
+07:55:56  cpu: 111%/70%  replicas=5   HPA 要求加到上限 5
+07:56~07:58  cpu: 76~98%              負載分散到更多 Pod
+07:58:37                               Job 跑滿 300 秒自動結束
+08:00:30  cpu:   2%/70%  replicas=5   CPU 已回落，縮容要等約 5 分鐘冷卻
+```
+
+**第 5 個 Pod 其實建不起來**：HPA 把 replicas 設成 5，但 Deployment
+一直停在 `4/5`，Events 出現：
+
+```text
+FailedCreate ... exceeded quota: drawio-quota, requested: limits.cpu=500m,
+limits.memory=512Mi,requests.memory=256Mi, used: limits.cpu=2,limits.memory=2Gi,
+requests.memory=1Gi
+```
+
+ResourceQuota 在**建立 Pod 當下**檢查「已用量 + 新 Pod 需求」，requests
+和 limits 都算，任何一項超過就直接拒絕，Pod 不會出現在 `kubectl get pods`：
+
+| Quota 項目 | 上限 | 4 個 Pod 已用 | 第 5 個再加 | 結果 |
+|---|---|---|---|---|
+| requests.cpu | 1 | 400m | +100m → 500m | ✅ 還夠 |
+| requests.memory | 1Gi | 1Gi | +256Mi → 1.25Gi | ❌ 超過 |
+| limits.cpu | 2 | 2 | +500m → 2.5 | ❌ 超過 |
+| limits.memory | 2Gi | 2Gi | +512Mi → 2.5Gi | ❌ 超過 |
+
+也就是說，目前的 Quota 只容得下 4 個 Pod，`05-hpa.yaml` 的
+`maxReplicas: 5` 實際上到不了。**這裡刻意保留不修**，當作課堂教材：
+
+- HPA 只負責改 Deployment 的 replicas 數字，不保證 Pod 真的建得出來；
+  ReplicaSet 會一直重試、一直 `FailedCreate`，直到 replicas 降回 4 以下。
+- 「HPA 上限 × 每個 Pod 的 requests/limits」必須小於等於 ResourceQuota，
+  三者要一起算。
+- 分辨兩種「新 Pod 起不來」：**沒有 Pod** + `FailedCreate: exceeded quota`
+  是 namespace 配額問題（看 ReplicaSet/namespace Events）；**有 Pod 但一直
+  `Pending`** + `Insufficient cpu/memory` 是節點容量問題（看
+  `kubectl describe pod`）。
+
+排查指令：
+
+```bash
+kubectl get deploy drawio -n drawio                  # READY 4/5
+kubectl get resourcequota -n drawio                  # 看哪幾項已經滿了
+kubectl get events -n drawio --field-selector reason=FailedCreate
+```
+
+想讓它真的擴到 5 個，Quota 至少要 `requests.memory ≥ 1280Mi`、
+`limits.cpu ≥ 2500m`、`limits.memory ≥ 2560Mi`；或者把 `maxReplicas`
+改成 4，讓設定跟實際一致。可以留給學員當練習題。
+
 ### 清除環境
 
 ```bash
 kubectl delete namespace drawio
+kubectl delete namespace hpa-loadgen   # 若有跑過 HPA 施壓測試
 ```

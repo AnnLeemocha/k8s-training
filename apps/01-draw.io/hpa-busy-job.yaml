@@ -1,17 +1,40 @@
+# 觀察 HPA scale-up 用的施壓 Job。
+# 刻意放在獨立的 hpa-loadgen namespace：
+#   - 若放在 drawio namespace，沒寫 resources 會被 LimitRange 預設的
+#     cpu limit 250m 限流，施壓端自己就是瓶頸；
+#   - 若在 drawio namespace 調高 limit，又會吃掉 drawio 的 ResourceQuota
+#     （limits.cpu: 2），HPA 要開新 Pod 時反而被 exceeded quota 擋下。
+# drawio 的 NetworkPolicy ingress 是 from: []，跨 namespace 可以打得到。
+# 測完清理：kubectl delete namespace hpa-loadgen
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hpa-loadgen
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: hpa-demo-load
-  namespace: drawio
+  namespace: hpa-loadgen
 spec:
   activeDeadlineSeconds: 300
   backoffLimit: 0
+  # 2 個施壓 Pod 同時跑，每個最多用 1 核。
+  parallelism: 2
+  completions: 2
   template:
     spec:
       restartPolicy: Never
       containers:
         - name: curl
           image: curlimages/curl:latest
+          resources:
+            requests:
+              cpu: 250m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
           command: ["sh", "-c"]
           args:
             - |
