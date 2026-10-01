@@ -21,7 +21,7 @@ metadata:
   name: daily-full-backup             # 產生的備份會叫 daily-full-backup-<UTC 時間戳>
   namespace: velero
 spec:
-  schedule: "0 1 * * *"               # cron 格式，Velero server 時區（UTC）→ 台灣時間 09:00
+  schedule: "0 16 * * *"               # cron 格式，Velero server 時區（UTC）→ 台灣時間 00:00
   # schedule: "CRON_TZ=Asia/Taipei 0 1 * * *"   # 想用台灣時間時可加 CRON_TZ 前綴
   useOwnerReferencesInBackup: false   # true = 刪除 Schedule 時連帶刪除它產生的備份（危險，保持 false）
   paused: false                       # true = 暫停排程（不刪除設定）

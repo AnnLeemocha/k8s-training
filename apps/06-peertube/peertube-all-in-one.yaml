@@ -179,8 +179,8 @@ spec:
       # 見上方教學重點：預設不指定節點；若要整組（postgres/redis/
       # peertube）釘到記憶體較寬裕的 gpu01，三個檔案的 nodeSelector
       # 都要一起取消註解。
-      # nodeSelector:
-      #   kubernetes.io/hostname: gpu01
+      nodeSelector:
+        nvidia.com/gpu: "true"
       # gpu01 平常帶有 NoSchedule taint（保留給 GPU 工作負載），這裡
       # 容忍這個 taint，Pod 才「有資格」排上 gpu01（但不保證一定排過去）。
       tolerations:
@@ -337,8 +337,8 @@ spec:
     spec:
       # 排程設定同 05-postgres-statefulset.yaml：只容忍 gpu01 的 taint、
       # 不指定節點；要釘到 gpu01 再取消註解 nodeSelector。
-      # nodeSelector:
-      #   kubernetes.io/hostname: gpu01
+      nodeSelector:
+        nvidia.com/gpu: "true"
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -492,8 +492,8 @@ spec:
     spec:
       # 排程設定同 postgres/redis：只容忍 gpu01 的 taint、不指定節點；
       # 要釘到 gpu01 再取消註解 nodeSelector。
-      # nodeSelector:
-      #   kubernetes.io/hostname: gpu01
+      nodeSelector:
+        nvidia.com/gpu: "true"
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

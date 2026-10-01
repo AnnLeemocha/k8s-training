@@ -73,7 +73,7 @@ helm uninstall onlyoffice -n onlyoffice
 
 | 參數 | 說明 | 預設值 |
 |---|---|---|
-| `nodePlacement.nodeSelector` | 指定節點（預設不設，由 Scheduler 自行挑選）。`k8s01~03` 記憶體長期在 81-91% 使用率，若 Pod 因 requests 排不進去，可設 `kubernetes.io/hostname: gpu01` 釘死在 `gpu01` | 未設定（`values.yaml` 內註解保留 `kubernetes.io/hostname: gpu01`） |
+| `nodePlacement.nodeSelector` | 指定節點（預設不設，由 Scheduler 自行挑選）。`k8s01~03` 記憶體長期在 81-91% 使用率，若 Pod 因 requests 排不進去，可設 `nvidia.com/gpu: "true"` 釘死在 `gpu01` | 未設定（`values.yaml` 內註解保留 `nvidia.com/gpu: "true"`） |
 | `nodePlacement.tolerations` | 對應 `gpu01` 的 `nvidia.com/gpu=true:NoSchedule` taint，讓 Pod「可以」排到 `gpu01`（不強制） | `[{key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}]` |
 
 ### `service` / `gateway` / `hostnames` / `networkPolicy`

@@ -88,7 +88,7 @@ kubectl get hpa drawio -n drawio -w
 # 終端機 B：施壓（2 個 Pod × 30 個 curl 迴圈反覆下載 js/app.min.js，300 秒後自動結束）
 kubectl apply -f hpa-busy-job.yaml
 # 重跑前先刪掉舊 Job；全部測完清理整個 namespace
-kubectl delete job hpa-demo-load -n hpa-loadgen
+kubectl delete job hpa-loadgen -n hpa-loadgen
 kubectl delete namespace hpa-loadgen
 ```
 

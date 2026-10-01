@@ -14,7 +14,7 @@ metadata:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: hpa-demo-load
+  name: hpa-loadgen
   namespace: hpa-loadgen
 spec:
   activeDeadlineSeconds: 300

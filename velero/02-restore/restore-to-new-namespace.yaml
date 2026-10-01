@@ -12,7 +12,7 @@ metadata:
   name: dr-course-restore-01
   namespace: velero
 spec:
-  backupName: dr-course-backup-01
+  backupName: dr-demo-backup-01
   namespaceMapping:
     dr-demo: dr-demo-restore          # 備份裡的 dr-demo → 還原成 dr-demo-restore
                                       # PVC/Secret/Service 裡的 namespace 都會跟著改寫

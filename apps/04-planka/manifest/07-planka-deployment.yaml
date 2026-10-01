@@ -38,8 +38,8 @@ spec:
       # gpu01 的 taint、不指定節點。若要取消註解 nodeSelector 把 app/db
       # 釘到同一台 gpu01，兩邊要一起改；同一台節點上彼此走內部網路，
       # 延遲也更低。
-      # nodeSelector:
-      #   kubernetes.io/hostname: gpu01
+      nodeSelector:
+        nvidia.com/gpu: "true"
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

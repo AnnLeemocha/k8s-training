@@ -92,8 +92,8 @@ persistence:
 # 可取消註解把 Pod 釘死在記憶體較空的 gpu01。注意 toleration 只是
 # 「能容忍 taint」，要指定節點仍須搭配 nodeSelector（或 nodeAffinity）。
 nodePlacement:
-  # nodeSelector:
-  #   kubernetes.io/hostname: gpu01
+  nodeSelector:
+    nvidia.com/gpu: "true"
   tolerations:
     - key: nvidia.com/gpu
       operator: Equal

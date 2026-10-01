@@ -34,6 +34,19 @@ spec:
       labels:
         app: drawio
     spec:
+      # 搭配 nodeSelector，選擇特定 label，確保只裝在指定的 GPU 節點上
+      # （已註解保留：預設只加 toleration、不指定節點，由 Scheduler 自行挑選）
+      # nodeSelector:
+      #   nvidia.com/gpu.present: "true"
+      #   nvidia.com/gpu: "true"
+      #   # 指定節點
+      #   kubernetes.io/hostname: gpu01
+      # 允許 Pod 忽略某個 Taint，或者說可以接受的節點的 Taint
+      # tolerations:
+      #   - key: nvidia.com/gpu
+      #     operator: Equal
+      #     value: "true"
+      #     effect: NoSchedule
       containers:
         - name: drawio
           image: jgraph/drawio:24.7.17

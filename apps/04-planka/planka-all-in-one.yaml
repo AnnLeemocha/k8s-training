@@ -167,8 +167,8 @@ spec:
       # GPU 工作負載的 taint，讓 Scheduler「可以」把它排到 gpu01，但不
       # 指定節點（nodeSelector 已註解保留），由各節點剩餘資源決定落點；
       # 若 Pod 卡在 Pending，再取消註解把它釘到 gpu01。
-      # nodeSelector:
-      #   kubernetes.io/hostname: gpu01
+      nodeSelector:
+        nvidia.com/gpu: "true"
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -348,8 +348,8 @@ spec:
       # gpu01 的 taint、不指定節點。若要取消註解 nodeSelector 把 app/db
       # 釘到同一台 gpu01，兩邊要一起改；同一台節點上彼此走內部網路，
       # 延遲也更低。
-      # nodeSelector:
-      #   kubernetes.io/hostname: gpu01
+      nodeSelector:
+        nvidia.com/gpu: "true"
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

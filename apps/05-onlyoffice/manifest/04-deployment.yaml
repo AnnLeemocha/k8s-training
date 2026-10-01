@@ -57,8 +57,8 @@ spec:
       # 指定排到哪個節點（預設註解、不指定，由 Scheduler 自行挑選）：
       # 要釘到特定節點時才取消註解，值要對應叢集實際節點名稱
       # （可用 `kubectl get nodes` 確認），詳細原因見檔頭說明。
-      # nodeSelector:
-      #   kubernetes.io/hostname: gpu01
+      nodeSelector:
+        nvidia.com/gpu: "true"
       # 容忍 gpu01 節點上「保留給 GPU 工作負載」的 taint，讓排程器
       # 「可以」把這個完全不需要 GPU 的 Pod 排過去（見檔頭說明）。
       # operator/value/effect 必須跟節點實際的 taint 完全對應，

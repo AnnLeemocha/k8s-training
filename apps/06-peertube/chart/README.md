@@ -31,7 +31,7 @@ tolerations、不指定節點，由 Scheduler 自行挑選；本叢集 `k8s01~03
 
 | 參數 | 說明 | 預設值 |
 |---|---|---|
-| `nodePlacement.nodeSelector` | 指定節點（預設不設） | 未設定（`values.yaml` 內註解保留 `kubernetes.io/hostname: gpu01`） |
+| `nodePlacement.nodeSelector` | 指定節點（預設不設） | 未設定（`values.yaml` 內註解保留 `nvidia.com/gpu: "true"`） |
 | `nodePlacement.tolerations` | 對應 `gpu01` 的 GPU taint，允許（不強制）排到 `gpu01` | `[{key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}]` |
 
 ### `postgres`
