@@ -26,6 +26,13 @@
   「Kubernetes 幫你做的『貼心』事，有時候反而是坑」的活教材，
   解法是在 Pod spec 關掉這個機制（我們本來就用 DNS 做服務發現，
   根本不需要這組舊式 env 注入）。
+- **第二個 initContainer `wait-for-mysql`（實測踩到的真坑）**：image 的
+  啟動腳本第一次啟動會自動跑 `flarum install`，但**安裝失敗也照樣把網站
+  跑起來**。全新環境 mysql 跟 flarum 同時啟動，mysql initdb 要 90 幾秒，
+  flarum 幾秒內就去安裝 → 連不到 DB 失敗 → 網頁停在「Install Flarum」
+  安裝表單，而且表單回 HTTP 200、probe 全過，Pod 不會重啟重試。解法是
+  先用 initContainer 等 `mysql:3306` 能連線再啟動主容器——initContainer
+  依序執行、一個跑完才跑下一個，順便示範「啟動順序依賴」怎麼處理。
 - **Secret 同 namespace 可以互相引用**：`mysql-secret`（02 號檔案）跟
   `flarum-secret`（05 號檔案）是兩個獨立的 Secret 物件，但 flarum 的
   Deployment 直接用 `secretKeyRef` 讀 `mysql-secret` 的 `MYSQL_PASSWORD`
@@ -95,10 +102,35 @@ helm install flarum ./chart -n flarum
   `readinessProbe` 的 `initialDelaySeconds`/`failureThreshold` 給得比較
   寬鬆，正常約 30～60 秒內會就緒。
 
+### 萬一還是看到「Install Flarum」安裝表單
+
+代表自動安裝失敗了（例如用的是沒有 `wait-for-mysql` 的舊版 YAML）。可以
+直接照下表填，**每個值都要跟 YAML 一致**——之後 Pod 重啟時，啟動腳本會
+用環境變數重新產生 `config.php`：
+
+| 欄位 | 值 | 來源 |
+|---|---|---|
+| Forum Title | `K8s Training Forum` | `FLARUM_TITLE` |
+| MySQL Host | **`mysql`**（不是預設的 `localhost`） | `DB_HOST` |
+| MySQL Database | `appdb` | `MYSQL_DATABASE` / `DB_NAME` |
+| MySQL Username | `appuser` | `MYSQL_USER` / `DB_USER` |
+| MySQL Password | `TrainingApp123!` | `MYSQL_PASSWORD` |
+| Table Prefix | 留空 | `DB_PREF` |
+| Admin Username / Email / Password | `admin` / `admin@example.com` / `TrainingAdmin123!` | `FLARUM_ADMIN_*` |
+
+填完後補建 lock 檔，避免 Pod 重啟時腳本以為還沒裝過、又重跑一次安裝：
+```bash
+kubectl exec -n flarum deploy/flarum -c flarum -- \
+  su-exec 991:991 touch /flarum/app/public/assets/._flarum-installed.lock
+```
+
+或者乾脆 `kubectl delete namespace flarum` 用新版 YAML 重來。
+
 ### 驗證與教學觀察點
 
 ```bash
 kubectl get pod,statefulset -n flarum -o wide
+kubectl logs -n flarum deploy/flarum -c wait-for-mysql      # 等 mysql 等了多久
 kubectl logs -n flarum deploy/flarum -c init-storage-dirs   # initContainer 做了什麼
 kubectl logs -n flarum deploy/flarum -c flarum --tail=30    # 應用程式本身的啟動過程
 kubectl get pvc -n flarum

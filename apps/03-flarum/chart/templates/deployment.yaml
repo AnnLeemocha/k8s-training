@@ -21,6 +21,19 @@ spec:
       # <SVCNAME>_PORT 環境變數會跟 Flarum 自己的 FLARUM_PORT 撞名，必須關閉。
       enableServiceLinks: false
       initContainers:
+        # 等 mysql 可連線才啟動 flarum，否則全新環境第一次自動安裝會失敗、
+        # 卡在網頁安裝表單（詳見 README「實測踩到的坑」）。
+        - name: wait-for-mysql
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 2 {{ .Values.db.host }} {{ .Values.db.port }}; do
+                echo "waiting for {{ .Values.db.host }}:{{ .Values.db.port }} ..."
+                sleep 3
+              done
+              echo "mysql is up"
         - name: init-storage-dirs
           image: busybox:1.36
           command:

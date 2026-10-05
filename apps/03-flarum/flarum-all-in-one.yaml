@@ -379,6 +379,14 @@ spec:
 #     （storage/logs、storage/cache、public/assets/avatars…），
 #     所以在主容器啟動前，先用一個 initContainer 把這些子目錄建好、
 #     並且 chown 成容器實際執行的 uid/gid（991:991），主程式才能正常寫入。
+#   - 第二個 initContainer wait-for-mysql（實測踩到的坑）：image 的啟動腳本
+#     第一次啟動時會跑 `flarum install` 自動安裝，但「安裝失敗也照樣把網站
+#     跑起來」。全新環境 mysql 跟 flarum 同時啟動、mysql initdb 要 90 幾秒，
+#     flarum 幾秒內就去安裝 → 連不到 DB 失敗 → 沒有 config.php → 網頁停在
+#     Flarum 的「Install Flarum」安裝表單；而安裝表單回 HTTP 200，probe
+#     全部通過、Pod 不會重啟重試，就一直卡在那裡。所以先用 initContainer
+#     等 mysql 的 3306 能連線，再讓主容器啟動。initContainer 依宣告順序
+#     「一個跑完才跑下一個」，這是示範「啟動順序依賴」的好例子。
 #   - replicas 只開 1、strategy 用 Recreate：flarum-storage 是 RWO，
 #     同時間只能被一個 Pod 掛載，滾動更新（同時存在新舊兩個 Pod）會卡住；
 #     且 Flarum 沒有內建跨 Pod 共享 session/cache 的機制——如果之後這門課
@@ -439,6 +447,23 @@ spec:
       # 完全不需要這組舊式 env-var 注入，直接關掉最乾淨。
       enableServiceLinks: false
       initContainers:
+        - name: wait-for-mysql
+          # 用 nc 檢查 mysql 的 3306 port 通了沒，不通就每 3 秒重試。
+          # 只看 port 就夠：mysql 官方 image 在 initdb 期間跑的暫時 server
+          # 是 --skip-networking，3306 不會開；port 一通代表 initdb 已經
+          # 跑完、帳號密碼都建好了。10 號檔案的 NetworkPolicy 本來就允許
+          # app=flarum 的 Pod 連 mysql:3306，initContainer 同屬這個 Pod，
+          # 不會被擋。
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 2 mysql 3306; do
+                echo "waiting for mysql:3306 ..."
+                sleep 3
+              done
+              echo "mysql is up"
         - name: init-storage-dirs
           # 用最小的 busybox 而不是 flarum 本尊的 image，只是為了跑幾行
           # shell 建目錄/改權限，開機快、也不會意外把應用程式的 entrypoint
